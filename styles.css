@@ -139,6 +139,16 @@ button:disabled {
   background: linear-gradient(180deg, #222b44 0%, #1a2136 100%);
 }
 
+.waveform-graph {
+  display: block;
+  width: 100%;
+  height: 130px;
+  margin: 0 0 10px;
+  border-radius: 8px;
+  border: 1px solid #e2e1db;
+  background: linear-gradient(180deg, #1f273f 0%, #182036 100%);
+}
+
 .accuracy-wrap {
   width: 100%;
   height: 26px;

@@ -19,6 +19,7 @@
   const statusText = document.getElementById("statusText");
   const inputLevelBar = document.getElementById("inputLevelBar");
   const inputLevelValue = document.getElementById("inputLevelValue");
+  const waveformGraph = document.getElementById("waveformGraph");
   const liveTempoValue = document.getElementById("liveTempoValue");
   const tempoGraph = document.getElementById("tempoGraph");
   const accuracyBar = document.getElementById("accuracyBar");
@@ -53,6 +54,8 @@
   let lastScoredBeatTimeMs = 0;
   let offsetSamples = [];
   let recentErrors = [];
+  let waveformSamples = [];
+  let clickMarkers = [];
   let calibrationOffsetMs = 0;
   let calibrationJitterMs = 5;
   let isCalibrating = false;
@@ -62,6 +65,7 @@
   const SCHEDULER_LOOKAHEAD_MS = 25;
   const GRAPH_WINDOW_MS = 15000;
   const SCORING_WINDOW_HITS = 12;
+  const WAVEFORM_WINDOW_MS = 2500;
 
   function getBeatIntervalMs() {
     const bpm = Number(bpmInput.value);
@@ -300,6 +304,143 @@
     drawTempoGraph(performance.now());
   }
 
+  function addClickMarker(timeMs) {
+    clickMarkers.push(timeMs);
+    const cutoff = performance.now() - WAVEFORM_WINDOW_MS;
+    clickMarkers = clickMarkers.filter((time) => time >= cutoff);
+  }
+
+  function getWaveChunkTiming(nowMs) {
+    if (!audioContext || !micData || micData.length < 2) {
+      return null;
+    }
+    const sampleRate = audioContext.sampleRate || 44100;
+    const spanMs = (micData.length / sampleRate) * 1000;
+    return {
+      spanMs,
+      startMs: nowMs - spanMs
+    };
+  }
+
+  function getOutputLatencyMs() {
+    if (!audioContext) {
+      return 0;
+    }
+    if (Number.isFinite(audioContext.outputLatency) && audioContext.outputLatency > 0) {
+      return audioContext.outputLatency * 1000;
+    }
+    return 0;
+  }
+
+  function addWaveformSamples(nowMs) {
+    if (!micData || !audioContext) {
+      return;
+    }
+    const timing = getWaveChunkTiming(nowMs);
+    if (!timing) {
+      return;
+    }
+    const stride = 8;
+    for (let i = 0; i < micData.length; i += stride) {
+      const value = (micData[i] - 128) / 128;
+      const t = timing.startMs + (i / (micData.length - 1)) * timing.spanMs;
+      waveformSamples.push({ timeMs: t, value });
+    }
+    const cutoff = nowMs - WAVEFORM_WINDOW_MS;
+    waveformSamples = waveformSamples.filter((point) => point.timeMs >= cutoff);
+  }
+
+  function drawWaveformGraph(nowMs) {
+    if (!waveformGraph || !waveformGraph.getContext) {
+      return;
+    }
+    const ctx = waveformGraph.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    const width = waveformGraph.width;
+    const height = waveformGraph.height;
+    const leftPad = 8;
+    const rightPad = 8;
+    const topPad = 8;
+    const bottomPad = 8;
+    const drawWidth = width - leftPad - rightPad;
+    const drawHeight = height - topPad - bottomPad;
+    const centerY = topPad + drawHeight / 2;
+    const windowStart = nowMs - WAVEFORM_WINDOW_MS;
+
+    const cutoff = nowMs - WAVEFORM_WINDOW_MS;
+    waveformSamples = waveformSamples.filter((point) => point.timeMs >= cutoff);
+    clickMarkers = clickMarkers.filter((time) => time >= cutoff);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(leftPad, centerY);
+    ctx.lineTo(width - rightPad, centerY);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(125, 205, 255, 0.9)";
+    ctx.lineWidth = 1.8;
+    for (let i = 0; i < clickMarkers.length; i += 1) {
+      // Shift visual click markers by learned calibration offset so
+      // calibrated "on-beat" spikes line up with marker positions.
+      const calibratedMarkerTime = clickMarkers[i] + calibrationOffsetMs;
+      const x = leftPad + ((calibratedMarkerTime - windowStart) / WAVEFORM_WINDOW_MS) * drawWidth;
+      ctx.beginPath();
+      ctx.moveTo(x, topPad);
+      ctx.lineTo(x, height - bottomPad);
+      ctx.stroke();
+    }
+
+    if (waveformSamples.length > 0) {
+      ctx.strokeStyle = "rgba(255, 206, 110, 0.98)";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      for (let i = 0; i < waveformSamples.length; i += 1) {
+        const point = waveformSamples[i];
+        const x = leftPad + ((point.timeMs - windowStart) / WAVEFORM_WINDOW_MS) * drawWidth;
+        const y = centerY - point.value * (drawHeight * 0.45);
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+  }
+
+  function resetWaveformGraph() {
+    waveformSamples = [];
+    clickMarkers = [];
+    drawWaveformGraph(performance.now());
+  }
+
+  function detectHitFromWaveformChunk(nowMs, sensitivity, gainMultiplier) {
+    const timing = getWaveChunkTiming(nowMs);
+    if (!timing || !micData) {
+      return null;
+    }
+
+    const threshold = 0.2 - sensitivity * 0.19;
+    let maxAbs = 0;
+    let maxIdx = -1;
+    for (let i = 1; i < micData.length; i += 1) {
+      const value = Math.abs((micData[i] - 128) / 128) * gainMultiplier;
+      if (value > maxAbs) {
+        maxAbs = value;
+        maxIdx = i;
+      }
+    }
+    if (maxIdx < 0 || maxAbs < threshold) {
+      return null;
+    }
+
+    return timing.startMs + (maxIdx / (micData.length - 1)) * timing.spanMs;
+  }
+
   function addOffsetSample(hitTimeMs, correctedSignedErrorMs) {
     const clamped = Math.max(-250, Math.min(250, correctedSignedErrorMs));
     offsetSamples.push({
@@ -447,9 +588,11 @@
       while (nextBeatTimeSec < audioContext.currentTime + SCHEDULE_AHEAD_SEC) {
         const beatPerfTime =
           performance.now() + (nextBeatTimeSec - audioContext.currentTime) * 1000;
+        const beatReferenceTime = beatPerfTime + getOutputLatencyMs();
         playClick(nextBeatTimeSec);
         scheduleVisualFlash(nextBeatTimeSec);
-        pushBeatTime(beatPerfTime);
+        pushBeatTime(beatReferenceTime);
+        addClickMarker(beatReferenceTime);
         nextBeatTimeSec += beatIntervalMs / 1000;
       }
     }, SCHEDULER_LOOKAHEAD_MS);
@@ -586,21 +729,21 @@
       const rms = Math.sqrt(sumSquare / micData.length);
       const sensitivity = Number(thresholdInput.value);
       const gainMultiplier = 1 + sensitivity * 4;
-      const boostedRms = rms * gainMultiplier;
       smoothedLevel = smoothedLevel * 0.78 + rms * 0.22;
       const boostedLevel = smoothedLevel * gainMultiplier;
       const levelPercent = Math.max(0, Math.min(100, Math.round(boostedLevel * 300)));
       inputLevelBar.style.width = levelPercent + "%";
       inputLevelValue.textContent = levelPercent + "%";
+      const now = performance.now();
+      addWaveformSamples(now);
+      drawWaveformGraph(now);
 
       if (isRunning) {
-        const now = performance.now();
         const dynamicCooldownMs = Math.max(85, Math.min(190, beatIntervalMs * 0.35));
-        // Sensitivity 0.00 = strict hit detection, 1.00 = very sensitive.
-        const detectionThreshold = 0.22 - sensitivity * 0.215;
-        if (boostedRms > detectionThreshold && now - lastDetectedAt > dynamicCooldownMs) {
-          lastDetectedAt = now;
-          const match = closestBeatMatch(now);
+        const hitTimeMs = detectHitFromWaveformChunk(now, sensitivity, gainMultiplier);
+        if (hitTimeMs !== null && hitTimeMs - lastDetectedAt > dynamicCooldownMs) {
+          lastDetectedAt = hitTimeMs;
+          const match = closestBeatMatch(hitTimeMs);
           if (match !== null) {
             if (Math.abs(match.beatTimeMs - lastScoredBeatTimeMs) < 1) {
               analysisRaf = requestAnimationFrame(loop);
@@ -608,7 +751,7 @@
             }
             lastScoredBeatTimeMs = match.beatTimeMs;
             collectCalibrationSample(match.signedErrorMs);
-            updateFeedback(match.signedErrorMs, now);
+            updateFeedback(match.signedErrorMs, hitTimeMs);
           }
         }
       }
@@ -874,6 +1017,7 @@
   resetScore();
   resetInputLevelUI();
   resetTempoGraph();
+  resetWaveformGraph();
   setCalibrationInfo("Calibration: none");
   setDeviceInfo("Click Detect Inputs to request access and list devices.");
   updateDiagnostics();
