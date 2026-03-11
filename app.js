@@ -5,6 +5,7 @@
   const bpmValue = document.getElementById("bpmValue");
   const thresholdInput = document.getElementById("threshold");
   const thresholdValue = document.getElementById("thresholdValue");
+  const pocketModeSelect = document.getElementById("pocketMode");
   const inputDeviceSelect = document.getElementById("inputDevice");
   const refreshDevicesButton = document.getElementById("refreshDevices");
   const deviceInfo = document.getElementById("deviceInfo");
@@ -18,11 +19,16 @@
   const statusText = document.getElementById("statusText");
   const inputLevelBar = document.getElementById("inputLevelBar");
   const inputLevelValue = document.getElementById("inputLevelValue");
+  const liveTempoValue = document.getElementById("liveTempoValue");
+  const tempoGraph = document.getElementById("tempoGraph");
   const accuracyBar = document.getElementById("accuracyBar");
   const lastErrorEl = document.getElementById("lastError");
   const lastPointsEl = document.getElementById("lastPoints");
   const totalScoreEl = document.getElementById("totalScore");
   const hitCountEl = document.getElementById("hitCount");
+  const accuracyScoreEl = document.getElementById("accuracyScore");
+  const consistencyScoreEl = document.getElementById("consistencyScore");
+  const stabilityScoreEl = document.getElementById("stabilityScore");
 
   let audioContext = null;
   let isRunning = false;
@@ -37,12 +43,16 @@
   let analyser = null;
   let micData = null;
   let analysisRaf = null;
+  let graphTimer = null;
   let activeDeviceId = "";
   let lastDetectedAt = 0;
 
   let totalScore = 0;
   let hitCount = 0;
   let smoothedLevel = 0;
+  let lastScoredBeatTimeMs = 0;
+  let offsetSamples = [];
+  let recentErrors = [];
   let calibrationOffsetMs = 0;
   let calibrationJitterMs = 5;
   let isCalibrating = false;
@@ -50,6 +60,8 @@
   const CALIBRATION_SAMPLE_COUNT = 16;
   const SCHEDULE_AHEAD_SEC = 0.12;
   const SCHEDULER_LOOKAHEAD_MS = 25;
+  const GRAPH_WINDOW_MS = 15000;
+  const SCORING_WINDOW_HITS = 12;
 
   function getBeatIntervalMs() {
     const bpm = Number(bpmInput.value);
@@ -59,6 +71,7 @@
   function updateBpmUI() {
     bpmValue.value = bpmInput.value;
     beatIntervalMs = getBeatIntervalMs();
+    drawTempoGraph(performance.now());
   }
 
   function updateThresholdUI() {
@@ -76,6 +89,242 @@
 
   function setCalibrationInfo(message) {
     calibrationInfo.textContent = message;
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function median(values) {
+    if (!values.length) {
+      return 0;
+    }
+    const sorted = values.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  }
+
+  function mad(values) {
+    if (!values.length) {
+      return 0;
+    }
+    const center = median(values);
+    const deviations = values.map((value) => Math.abs(value - center));
+    return median(deviations);
+  }
+
+  function getPocketTargetMs() {
+    const mode = pocketModeSelect.value;
+    if (mode === "laidback") {
+      return 20;
+    }
+    if (mode === "push") {
+      return -20;
+    }
+    return 0;
+  }
+
+  function updateSubScoreUI(accuracy, consistency, stability) {
+    accuracyScoreEl.textContent = String(Math.round(accuracy));
+    consistencyScoreEl.textContent = String(Math.round(consistency));
+    stabilityScoreEl.textContent = String(Math.round(stability));
+  }
+
+  function getMusicalScore(correctedSignedError) {
+    recentErrors.push(correctedSignedError);
+    if (recentErrors.length > SCORING_WINDOW_HITS) {
+      recentErrors.shift();
+    }
+
+    const targetMs = getPocketTargetMs();
+    const centeredErrors = recentErrors.map((value) => value - targetMs);
+    const currentCenteredError = correctedSignedError - targetMs;
+    const bias = median(recentErrors);
+    const jitter = 1.4826 * mad(centeredErrors);
+    const diffs = [];
+    for (let i = 1; i < centeredErrors.length; i += 1) {
+      diffs.push(centeredErrors[i] - centeredErrors[i - 1]);
+    }
+    const instability = mad(diffs);
+
+    const accuracyScore = clamp(100 - Math.abs(currentCenteredError) * 1.4, 0, 100);
+    const consistencyScore = clamp(100 - jitter * 2.0, 0, 100);
+    const stabilityScore = clamp(100 - instability * 2.3, 0, 100);
+    const pocketScore = clamp(100 - Math.abs(bias - targetMs) * 1.2, 0, 100);
+
+    const weightedScore =
+      accuracyScore * 0.45 +
+      consistencyScore * 0.3 +
+      stabilityScore * 0.15 +
+      pocketScore * 0.1;
+
+    updateSubScoreUI(accuracyScore, consistencyScore, stabilityScore);
+    return Math.round(weightedScore);
+  }
+
+  function refreshSubScoresFromRecent() {
+    if (!recentErrors.length) {
+      updateSubScoreUI(0, 0, 0);
+      return;
+    }
+    const targetMs = getPocketTargetMs();
+    const centeredErrors = recentErrors.map((value) => value - targetMs);
+    const currentCenteredError = centeredErrors[centeredErrors.length - 1];
+    const bias = median(recentErrors);
+    const jitter = 1.4826 * mad(centeredErrors);
+    const diffs = [];
+    for (let i = 1; i < centeredErrors.length; i += 1) {
+      diffs.push(centeredErrors[i] - centeredErrors[i - 1]);
+    }
+    const instability = mad(diffs);
+    const accuracyScore = clamp(100 - Math.abs(currentCenteredError) * 1.4, 0, 100);
+    const consistencyScore = clamp(100 - jitter * 2.0, 0, 100);
+    const stabilityScore = clamp(100 - instability * 2.3, 0, 100);
+    const pocketScore = clamp(100 - Math.abs(bias - targetMs) * 1.2, 0, 100);
+    const weightedScore =
+      accuracyScore * 0.45 +
+      consistencyScore * 0.3 +
+      stabilityScore * 0.15 +
+      pocketScore * 0.1;
+    lastPointsEl.textContent = String(Math.round(weightedScore));
+    updateSubScoreUI(accuracyScore, consistencyScore, stabilityScore);
+  }
+
+  function valueToY(value, minValue, maxValue, graphHeight) {
+    const normalized = (value - minValue) / (maxValue - minValue);
+    return graphHeight - normalized * graphHeight;
+  }
+
+  function getGraphErrorRange(samples) {
+    const values = [0];
+    for (let i = 0; i < samples.length; i += 1) {
+      values.push(samples[i].errorMs);
+    }
+    let maxAbs = 20;
+    for (let i = 0; i < values.length; i += 1) {
+      maxAbs = Math.max(maxAbs, Math.abs(values[i]));
+    }
+    maxAbs = Math.min(220, Math.ceil((maxAbs + 10) / 10) * 10);
+    return {
+      min: -maxAbs,
+      max: maxAbs
+    };
+  }
+
+  function pruneTempoSamples(nowMs) {
+    const cutoff = nowMs - GRAPH_WINDOW_MS;
+    offsetSamples = offsetSamples.filter((sample) => sample.timeMs >= cutoff);
+  }
+
+  function drawTempoGraph(nowMs) {
+    if (!tempoGraph || !tempoGraph.getContext) {
+      return;
+    }
+
+    const ctx = tempoGraph.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
+    pruneTempoSamples(nowMs);
+    const width = tempoGraph.width;
+    const height = tempoGraph.height;
+    const leftPad = 42;
+    const rightPad = 8;
+    const range = getGraphErrorRange(offsetSamples);
+    const windowStart = nowMs - GRAPH_WINDOW_MS;
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i += 1) {
+      const errorMs = range.max - (i / 4) * (range.max - range.min);
+      const y = valueToY(errorMs, range.min, range.max, height);
+      ctx.beginPath();
+      ctx.moveTo(leftPad, y);
+      ctx.lineTo(width - rightPad, y);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(245, 247, 252, 0.8)";
+      const rounded = Math.round(errorMs);
+      const label = rounded > 0 ? "+" + rounded + " ms" : rounded + " ms";
+      ctx.fillText(label, 6, y);
+    }
+
+    const targetY = valueToY(0, range.min, range.max, height);
+    ctx.strokeStyle = "rgba(89, 220, 157, 0.95)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(leftPad, targetY);
+    ctx.lineTo(width - rightPad, targetY);
+    ctx.stroke();
+
+    if (offsetSamples.length > 0) {
+      ctx.strokeStyle = "rgba(255, 205, 84, 0.98)";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i < offsetSamples.length; i += 1) {
+        const sample = offsetSamples[i];
+        const x =
+          leftPad +
+          ((sample.timeMs - windowStart) / GRAPH_WINDOW_MS) * (width - leftPad - rightPad);
+        const y = valueToY(sample.errorMs, range.min, range.max, height);
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(255, 205, 84, 1)";
+      for (let i = 0; i < offsetSamples.length; i += 1) {
+        const sample = offsetSamples[i];
+        const x =
+          leftPad +
+          ((sample.timeMs - windowStart) / GRAPH_WINDOW_MS) * (width - leftPad - rightPad);
+        const y = valueToY(sample.errorMs, range.min, range.max, height);
+        ctx.beginPath();
+        ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function resetTempoGraph() {
+    offsetSamples = [];
+    liveTempoValue.textContent = "--";
+    drawTempoGraph(performance.now());
+  }
+
+  function addOffsetSample(hitTimeMs, correctedSignedErrorMs) {
+    const clamped = Math.max(-250, Math.min(250, correctedSignedErrorMs));
+    offsetSamples.push({
+      timeMs: hitTimeMs,
+      errorMs: clamped
+    });
+    const rounded = Math.round(clamped);
+    liveTempoValue.textContent = rounded > 0 ? "+" + rounded : String(rounded);
+    drawTempoGraph(hitTimeMs);
+  }
+
+  function startGraphLoop() {
+    if (graphTimer) {
+      return;
+    }
+    graphTimer = setInterval(() => {
+      drawTempoGraph(performance.now());
+    }, 120);
+  }
+
+  function stopGraphLoop() {
+    if (graphTimer) {
+      clearInterval(graphTimer);
+      graphTimer = null;
+    }
   }
 
   function formatError(error) {
@@ -130,11 +379,13 @@
   function resetScore() {
     totalScore = 0;
     hitCount = 0;
+    recentErrors = [];
     totalScoreEl.textContent = "0";
     hitCountEl.textContent = "Hits: 0";
     lastErrorEl.textContent = "--";
     lastPointsEl.textContent = "--";
     accuracyBar.style.width = "0%";
+    updateSubScoreUI(0, 0, 0);
   }
 
   function resetInputLevelUI() {
@@ -204,37 +455,47 @@
     }, SCHEDULER_LOOKAHEAD_MS);
   }
 
-  function closestBeatErrorMs(hitTimeMs) {
+  function closestBeatMatch(hitTimeMs) {
     if (beatTimes.length === 0) {
       return null;
     }
-    let closest = Infinity;
+    let closestDistance = Infinity;
+    let closestBeatTime = beatTimes[0];
     for (let i = 0; i < beatTimes.length; i += 1) {
-      const distance = Math.abs(hitTimeMs - beatTimes[i]);
-      if (distance < closest) {
-        closest = distance;
+      const beatTime = beatTimes[i];
+      const distance = Math.abs(hitTimeMs - beatTime);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestBeatTime = beatTime;
       }
     }
-    return closest;
+    return {
+      beatTimeMs: closestBeatTime,
+      signedErrorMs: hitTimeMs - closestBeatTime,
+      absErrorMs: closestDistance
+    };
   }
 
-  function scoreFromError(errorMs) {
-    return Math.max(0, Math.round(100 - Math.abs(errorMs)));
+  function getCalibratedSignedError(rawErrorMs) {
+    const compensated = rawErrorMs - calibrationOffsetMs;
+    const absCompensated = Math.abs(compensated);
+    if (absCompensated <= calibrationJitterMs) {
+      return 0;
+    }
+    const sign = compensated < 0 ? -1 : 1;
+    return sign * (absCompensated - calibrationJitterMs);
   }
 
-  function getCalibratedError(rawErrorMs) {
-    const compensated = Math.abs(rawErrorMs - calibrationOffsetMs);
-    return Math.max(0, compensated - calibrationJitterMs);
-  }
+  function updateFeedback(rawErrorMs, hitTimeMs) {
+    const correctedSignedError = getCalibratedSignedError(rawErrorMs);
+    const points = getMusicalScore(correctedSignedError);
 
-  function updateFeedback(rawErrorMs) {
-    const correctedError = getCalibratedError(rawErrorMs);
-    const points = scoreFromError(correctedError);
-
-    lastErrorEl.textContent = String(Math.round(correctedError));
+    const roundedError = Math.round(correctedSignedError);
+    lastErrorEl.textContent = roundedError > 0 ? "+" + roundedError : String(roundedError);
     lastPointsEl.textContent = String(points);
+    addOffsetSample(hitTimeMs, correctedSignedError);
 
-    const widthPercent = Math.max(0, Math.min(100, points));
+    const widthPercent = clamp(points, 0, 100);
     accuracyBar.style.width = widthPercent + "%";
 
     totalScore += points;
@@ -269,7 +530,7 @@
         ? (deviations[devMid - 1] + deviations[devMid]) / 2
         : deviations[devMid];
 
-    calibrationOffsetMs = median;
+    calibrationOffsetMs = Math.max(-150, Math.min(150, median));
     calibrationJitterMs = Math.max(5, Math.min(25, Math.round(mad * 2)));
     isCalibrating = false;
     calibrationSamples = [];
@@ -288,6 +549,9 @@
     if (!isCalibrating) {
       return;
     }
+    if (Math.abs(rawErrorMs) > beatIntervalMs * 0.45) {
+      return;
+    }
     calibrationSamples.push(rawErrorMs);
     setCalibrationInfo(
       "Calibration: collecting samples (" +
@@ -302,7 +566,6 @@
   }
 
   function startAudioAnalysisLoop() {
-    const cooldownMs = 90;
     if (analysisRaf) {
       return;
     }
@@ -332,14 +595,20 @@
 
       if (isRunning) {
         const now = performance.now();
+        const dynamicCooldownMs = Math.max(85, Math.min(190, beatIntervalMs * 0.35));
         // Sensitivity 0.00 = strict hit detection, 1.00 = very sensitive.
         const detectionThreshold = 0.22 - sensitivity * 0.215;
-        if (boostedRms > detectionThreshold && now - lastDetectedAt > cooldownMs) {
+        if (boostedRms > detectionThreshold && now - lastDetectedAt > dynamicCooldownMs) {
           lastDetectedAt = now;
-          const rawError = closestBeatErrorMs(now);
-          if (rawError !== null) {
-            collectCalibrationSample(rawError);
-            updateFeedback(rawError);
+          const match = closestBeatMatch(now);
+          if (match !== null) {
+            if (Math.abs(match.beatTimeMs - lastScoredBeatTimeMs) < 1) {
+              analysisRaf = requestAnimationFrame(loop);
+              return;
+            }
+            lastScoredBeatTimeMs = match.beatTimeMs;
+            collectCalibrationSample(match.signedErrorMs);
+            updateFeedback(match.signedErrorMs, now);
           }
         }
       }
@@ -535,12 +804,15 @@
       nextBeatTimeSec = audioContext.currentTime + 0.02;
       beatIntervalMs = getBeatIntervalMs();
       lastDetectedAt = 0;
+      lastScoredBeatTimeMs = 0;
+      resetTempoGraph();
 
       startButton.disabled = true;
       stopButton.disabled = false;
       setStatus("Running - tap, clap, or strike to score");
 
       scheduleBeatLoop();
+      startGraphLoop();
     } catch (error) {
       const errorText = formatError(error);
       setStatus("Mic permission/device error: " + errorText, true);
@@ -564,6 +836,8 @@
       clearTimeout(flashTimeout);
       flashTimeout = null;
     }
+    stopGraphLoop();
+    drawTempoGraph(performance.now());
 
     // Keep the selected mic preview active so input level remains visible.
     startInputPreview();
@@ -578,6 +852,10 @@
   thresholdInput.addEventListener("input", updateThresholdUI);
   refreshDevicesButton.addEventListener("click", () => refreshInputDevices(true));
   inputDeviceSelect.addEventListener("change", startInputPreview);
+  pocketModeSelect.addEventListener("change", () => {
+    refreshSubScoresFromRecent();
+    setStatus("Pocket mode set to " + pocketModeSelect.options[pocketModeSelect.selectedIndex].text);
+  });
   startButton.addEventListener("click", start);
   stopButton.addEventListener("click", stop);
   calibrateButton.addEventListener("click", startCalibration);
@@ -595,6 +873,7 @@
   updateThresholdUI();
   resetScore();
   resetInputLevelUI();
+  resetTempoGraph();
   setCalibrationInfo("Calibration: none");
   setDeviceInfo("Click Detect Inputs to request access and list devices.");
   updateDiagnostics();

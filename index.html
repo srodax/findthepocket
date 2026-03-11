@@ -32,6 +32,15 @@
           <input id="threshold" type="range" min="0" max="1" value="0.8" step="0.01" />
           <output id="thresholdValue" for="threshold">0.80</output>
         </div>
+        <div class="row">
+          <label for="pocketMode">Pocket Mode</label>
+          <select id="pocketMode">
+            <option value="strict">Strict (0 ms)</option>
+            <option value="laidback">Laid-back (+20 ms)</option>
+            <option value="push">Push (-20 ms)</option>
+          </select>
+          <span></span>
+        </div>
 
         <div class="buttons">
           <button id="startButton" type="button">Start</button>
@@ -49,6 +58,8 @@
         <div class="level-wrap">
           <div id="inputLevelBar" class="level-bar"></div>
         </div>
+        <p class="meter-label">Live Offset: <span id="liveTempoValue">--</span> ms</p>
+        <canvas id="tempoGraph" class="tempo-graph" width="700" height="170"></canvas>
         <div class="accuracy-wrap">
           <div id="accuracyBar" class="accuracy-bar"></div>
         </div>
@@ -62,6 +73,10 @@
         <p>Total score</p>
         <p id="totalScore" class="score-number">0</p>
         <p id="hitCount" class="small">Hits: 0</p>
+        <p id="subScores" class="small">
+          Accuracy: <span id="accuracyScore">--</span> | Consistency:
+          <span id="consistencyScore">--</span> | Stability: <span id="stabilityScore">--</span>
+        </p>
       </section>
     </main>
 
