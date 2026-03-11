@@ -33,6 +33,7 @@
 
   let audioContext = null;
   let isRunning = false;
+  let isCalibrationSession = false;
   let beatTimer = null;
   let flashTimeout = null;
   let nextBeatTimeSec = 0;
@@ -648,14 +649,79 @@
   }
 
   function startCalibration() {
-    if (!isRunning) {
-      setStatus("Start the metronome first, then press Calibrate", true);
+    if (isCalibrationSession) {
       return;
     }
-    isCalibrating = true;
-    calibrationSamples = [];
-    setStatus("Calibrating... make steady test hits for 16 beats");
-    setCalibrationInfo("Calibration: collecting samples (0/" + CALIBRATION_SAMPLE_COUNT + ")");
+    if (isRunning) {
+      stop();
+    }
+    startCalibrationSession();
+  }
+
+  function stopBeatEngine() {
+    if (beatTimer) {
+      clearInterval(beatTimer);
+      beatTimer = null;
+    }
+    if (flashTimeout) {
+      clearTimeout(flashTimeout);
+      flashTimeout = null;
+    }
+    beatFlash.classList.remove("active");
+  }
+
+  async function startCalibrationSession() {
+    try {
+      assertSupportedCaptureContext();
+      await ensureAudioContext();
+      await setupMicInput();
+      await refreshInputDevices(false);
+
+      isCalibrationSession = true;
+      isCalibrating = true;
+      calibrationSamples = [];
+      beatTimes = [];
+      nextBeatTimeSec = audioContext.currentTime + 0.02;
+      beatIntervalMs = getBeatIntervalMs();
+      lastDetectedAt = 0;
+      lastScoredBeatTimeMs = 0;
+      resetTempoGraph();
+
+      startButton.disabled = true;
+      stopButton.disabled = true;
+      calibrateButton.disabled = true;
+      setStatus("Calibrating... play steady for 16 beats");
+      setCalibrationInfo("Calibration: collecting samples (0/" + CALIBRATION_SAMPLE_COUNT + ")");
+
+      scheduleBeatLoop();
+      startGraphLoop();
+    } catch (error) {
+      const errorText = formatError(error);
+      isCalibrationSession = false;
+      isCalibrating = false;
+      calibrateButton.disabled = false;
+      setStatus("Calibration setup failed: " + errorText, true);
+      updateDiagnostics("lastError=" + errorText);
+    }
+  }
+
+  function stopCalibrationSession(completed) {
+    isCalibrationSession = false;
+    isCalibrating = false;
+    stopBeatEngine();
+    stopGraphLoop();
+    drawTempoGraph(performance.now());
+    startInputPreview();
+
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    calibrateButton.disabled = false;
+
+    if (completed) {
+      setStatus("Calibration complete - press Start to play");
+    } else {
+      setStatus("Calibration stopped");
+    }
   }
 
   function finalizeCalibration() {
@@ -675,7 +741,6 @@
 
     calibrationOffsetMs = Math.max(-150, Math.min(150, median));
     calibrationJitterMs = Math.max(5, Math.min(25, Math.round(mad * 2)));
-    isCalibrating = false;
     calibrationSamples = [];
 
     setStatus("Calibration applied");
@@ -686,6 +751,11 @@
         calibrationJitterMs +
         " ms"
     );
+    if (isCalibrationSession) {
+      stopCalibrationSession(true);
+    } else {
+      isCalibrating = false;
+    }
   }
 
   function collectCalibrationSample(rawErrorMs) {
@@ -738,7 +808,7 @@
       addWaveformSamples(now);
       drawWaveformGraph(now);
 
-      if (isRunning) {
+      if (isRunning || isCalibrationSession) {
         const dynamicCooldownMs = Math.max(85, Math.min(190, beatIntervalMs * 0.35));
         const hitTimeMs = detectHitFromWaveformChunk(now, sensitivity, gainMultiplier);
         if (hitTimeMs !== null && hitTimeMs - lastDetectedAt > dynamicCooldownMs) {
@@ -751,7 +821,12 @@
             }
             lastScoredBeatTimeMs = match.beatTimeMs;
             collectCalibrationSample(match.signedErrorMs);
-            updateFeedback(match.signedErrorMs, hitTimeMs);
+            if (isRunning) {
+              updateFeedback(match.signedErrorMs, hitTimeMs);
+            } else {
+              const correctedSignedError = getCalibratedSignedError(match.signedErrorMs);
+              addOffsetSample(hitTimeMs, correctedSignedError);
+            }
           }
         }
       }
@@ -930,7 +1005,7 @@
   }
 
   async function start() {
-    if (isRunning) {
+    if (isRunning || isCalibrationSession) {
       return;
     }
 
@@ -966,19 +1041,16 @@
   }
 
   function stop() {
+    if (isCalibrationSession) {
+      stopCalibrationSession(false);
+      return;
+    }
     if (!isRunning) {
       return;
     }
 
     isRunning = false;
-    if (beatTimer) {
-      clearInterval(beatTimer);
-      beatTimer = null;
-    }
-    if (flashTimeout) {
-      clearTimeout(flashTimeout);
-      flashTimeout = null;
-    }
+    stopBeatEngine();
     stopGraphLoop();
     drawTempoGraph(performance.now());
 
@@ -987,7 +1059,6 @@
 
     startButton.disabled = false;
     stopButton.disabled = true;
-    beatFlash.classList.remove("active");
     setStatus("Stopped");
   }
 
