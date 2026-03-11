@@ -41,12 +41,22 @@
           </select>
           <span></span>
         </div>
+        <div class="row">
+          <label for="runDuration">Run Duration</label>
+          <select id="runDuration">
+            <option value="0">Indefinite</option>
+            <option value="1">1 minute</option>
+            <option value="3">3 minutes</option>
+            <option value="5">5 minutes</option>
+            <option value="10">10 minutes</option>
+          </select>
+          <span></span>
+        </div>
 
         <div class="buttons">
           <button id="startButton" type="button">Start</button>
           <button id="stopButton" type="button" disabled>Stop</button>
           <button id="calibrateButton" type="button">Calibrate</button>
-          <button id="resetScoreButton" type="button">Reset Score</button>
         </div>
         <p id="calibrationInfo" class="small">Calibration: none</p>
       </section>
@@ -60,6 +70,16 @@
         </div>
         <p class="meter-label">Raw Input Waveform</p>
         <canvas id="waveformGraph" class="waveform-graph" width="700" height="130"></canvas>
+        <div class="session-timers" aria-live="polite">
+          <div class="timer-card">
+            <p class="timer-label">Time Left</p>
+            <p id="timeLeftValue" class="timer-value">--:--</p>
+          </div>
+          <div class="timer-card">
+            <p class="timer-label">Hits Left</p>
+            <p id="hitsLeftValue" class="timer-value">--</p>
+          </div>
+        </div>
         <p class="meter-label">Live Offset: <span id="liveTempoValue">--</span> ms</p>
         <canvas id="tempoGraph" class="tempo-graph" width="700" height="170"></canvas>
         <div class="accuracy-wrap">
@@ -73,7 +93,15 @@
 
       <section class="score card">
         <p>Total score</p>
-        <p id="totalScore" class="score-number">0</p>
+        <div class="score-main">
+          <p id="totalScore" class="score-number">0</p>
+          <p id="sessionBreakdown" class="small score-breakdown">
+            Accuracy total: <span id="sessionAccuracy">0</span> | Consistency total:
+            <span id="sessionConsistency">0</span><br />
+            Stability total: <span id="sessionStability">0</span> | Pocket total:
+            <span id="sessionPocket">0</span>
+          </p>
+        </div>
         <p id="hitCount" class="small">Hits: 0</p>
         <p id="subScores" class="small">
           Accuracy: <span id="accuracyScore">--</span> | Consistency:

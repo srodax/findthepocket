@@ -6,6 +6,7 @@
   const thresholdInput = document.getElementById("threshold");
   const thresholdValue = document.getElementById("thresholdValue");
   const pocketModeSelect = document.getElementById("pocketMode");
+  const runDurationSelect = document.getElementById("runDuration");
   const inputDeviceSelect = document.getElementById("inputDevice");
   const refreshDevicesButton = document.getElementById("refreshDevices");
   const deviceInfo = document.getElementById("deviceInfo");
@@ -13,7 +14,6 @@
   const startButton = document.getElementById("startButton");
   const stopButton = document.getElementById("stopButton");
   const calibrateButton = document.getElementById("calibrateButton");
-  const resetScoreButton = document.getElementById("resetScoreButton");
   const calibrationInfo = document.getElementById("calibrationInfo");
   const beatFlash = document.getElementById("beatFlash");
   const statusText = document.getElementById("statusText");
@@ -27,13 +27,22 @@
   const lastPointsEl = document.getElementById("lastPoints");
   const totalScoreEl = document.getElementById("totalScore");
   const hitCountEl = document.getElementById("hitCount");
+  const timeLeftValueEl = document.getElementById("timeLeftValue");
+  const hitsLeftValueEl = document.getElementById("hitsLeftValue");
   const accuracyScoreEl = document.getElementById("accuracyScore");
   const consistencyScoreEl = document.getElementById("consistencyScore");
   const stabilityScoreEl = document.getElementById("stabilityScore");
+  const sessionAccuracyEl = document.getElementById("sessionAccuracy");
+  const sessionConsistencyEl = document.getElementById("sessionConsistency");
+  const sessionStabilityEl = document.getElementById("sessionStability");
+  const sessionPocketEl = document.getElementById("sessionPocket");
 
   let audioContext = null;
   let isRunning = false;
   let isCalibrationSession = false;
+  let runDurationTimeout = null;
+  let sessionStatsTimer = null;
+  let sessionEndTimeMs = 0;
   let beatTimer = null;
   let flashTimeout = null;
   let nextBeatTimeSec = 0;
@@ -57,6 +66,10 @@
   let recentErrors = [];
   let waveformSamples = [];
   let clickMarkers = [];
+  let sessionSumAccuracy = 0;
+  let sessionSumConsistency = 0;
+  let sessionSumStability = 0;
+  let sessionSumPocket = 0;
   let calibrationOffsetMs = 0;
   let calibrationJitterMs = 5;
   let isCalibrating = false;
@@ -77,6 +90,7 @@
     bpmValue.value = bpmInput.value;
     beatIntervalMs = getBeatIntervalMs();
     drawTempoGraph(performance.now());
+    updateSessionStats();
   }
 
   function updateThresholdUI() {
@@ -94,6 +108,53 @@
 
   function setCalibrationInfo(message) {
     calibrationInfo.textContent = message;
+  }
+
+  function getRunDurationMs() {
+    const durationMinutes = Number(runDurationSelect.value);
+    if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+      return 0;
+    }
+    return durationMinutes * 60 * 1000;
+  }
+
+  function clearRunDurationTimeout() {
+    if (runDurationTimeout) {
+      clearTimeout(runDurationTimeout);
+      runDurationTimeout = null;
+    }
+  }
+
+  function clearSessionStatsTimer() {
+    if (sessionStatsTimer) {
+      clearInterval(sessionStatsTimer);
+      sessionStatsTimer = null;
+    }
+  }
+
+  function formatMsToClock(ms) {
+    const safeMs = Math.max(0, ms);
+    const totalSeconds = Math.ceil(safeMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return String(minutes).padStart(2, "0") + ":" + String(seconds).padStart(2, "0");
+  }
+
+  function updateSessionStats() {
+    if (!isRunning) {
+      timeLeftValueEl.textContent = "--:--";
+      hitsLeftValueEl.textContent = "--";
+      return;
+    }
+    if (sessionEndTimeMs <= 0) {
+      timeLeftValueEl.textContent = "\u221e";
+      hitsLeftValueEl.textContent = "\u221e";
+      return;
+    }
+    const remainingMs = Math.max(0, sessionEndTimeMs - performance.now());
+    const hitsLeft = Math.max(0, Math.ceil(remainingMs / beatIntervalMs));
+    timeLeftValueEl.textContent = formatMsToClock(remainingMs);
+    hitsLeftValueEl.textContent = String(hitsLeft);
   }
 
   function clamp(value, min, max) {
@@ -135,6 +196,34 @@
     stabilityScoreEl.textContent = String(Math.round(stability));
   }
 
+  function updateSessionBreakdownUI() {
+    sessionAccuracyEl.textContent = String(Math.round(sessionSumAccuracy));
+    sessionConsistencyEl.textContent = String(Math.round(sessionSumConsistency));
+    sessionStabilityEl.textContent = String(Math.round(sessionSumStability));
+    sessionPocketEl.textContent = String(Math.round(sessionSumPocket));
+  }
+
+  function distributeComponentPoints(points, score) {
+    const weightedAccuracy = score.accuracyScore * 0.45;
+    const weightedConsistency = score.consistencyScore * 0.3;
+    const weightedStability = score.stabilityScore * 0.15;
+    const weightedPocket = score.pocketScore * 0.1;
+    const weightedTotal =
+      weightedAccuracy + weightedConsistency + weightedStability + weightedPocket;
+
+    if (points <= 0 || weightedTotal <= 0) {
+      return { accuracy: 0, consistency: 0, stability: 0, pocket: 0 };
+    }
+
+    // Allocate integer component points so component totals always sum exactly to points.
+    const accuracy = Math.floor((weightedAccuracy / weightedTotal) * points);
+    const consistency = Math.floor((weightedConsistency / weightedTotal) * points);
+    const stability = Math.floor((weightedStability / weightedTotal) * points);
+    const pocket = points - accuracy - consistency - stability;
+
+    return { accuracy, consistency, stability, pocket };
+  }
+
   function getMusicalScore(correctedSignedError) {
     recentErrors.push(correctedSignedError);
     if (recentErrors.length > SCORING_WINDOW_HITS) {
@@ -163,8 +252,13 @@
       stabilityScore * 0.15 +
       pocketScore * 0.1;
 
-    updateSubScoreUI(accuracyScore, consistencyScore, stabilityScore);
-    return Math.round(weightedScore);
+    return {
+      points: Math.round(weightedScore),
+      accuracyScore,
+      consistencyScore,
+      stabilityScore,
+      pocketScore
+    };
   }
 
   function refreshSubScoresFromRecent() {
@@ -522,12 +616,17 @@
     totalScore = 0;
     hitCount = 0;
     recentErrors = [];
+    sessionSumAccuracy = 0;
+    sessionSumConsistency = 0;
+    sessionSumStability = 0;
+    sessionSumPocket = 0;
     totalScoreEl.textContent = "0";
     hitCountEl.textContent = "Hits: 0";
     lastErrorEl.textContent = "--";
     lastPointsEl.textContent = "--";
     accuracyBar.style.width = "0%";
     updateSubScoreUI(0, 0, 0);
+    updateSessionBreakdownUI();
   }
 
   function resetInputLevelUI() {
@@ -632,7 +731,15 @@
 
   function updateFeedback(rawErrorMs, hitTimeMs) {
     const correctedSignedError = getCalibratedSignedError(rawErrorMs);
-    const points = getMusicalScore(correctedSignedError);
+    const score = getMusicalScore(correctedSignedError);
+    const points = score.points;
+    const componentPoints = distributeComponentPoints(points, score);
+    updateSubScoreUI(score.accuracyScore, score.consistencyScore, score.stabilityScore);
+    sessionSumAccuracy += componentPoints.accuracy;
+    sessionSumConsistency += componentPoints.consistency;
+    sessionSumStability += componentPoints.stability;
+    sessionSumPocket += componentPoints.pocket;
+    updateSessionBreakdownUI();
 
     const roundedError = Math.round(correctedSignedError);
     lastErrorEl.textContent = roundedError > 0 ? "+" + roundedError : String(roundedError);
@@ -659,6 +766,9 @@
   }
 
   function stopBeatEngine() {
+    clearRunDurationTimeout();
+    clearSessionStatsTimer();
+    sessionEndTimeMs = 0;
     if (beatTimer) {
       clearInterval(beatTimer);
       beatTimer = null;
@@ -1018,6 +1128,7 @@
       await refreshInputDevices(false);
 
       isRunning = true;
+      resetScore();
       beatTimes = [];
       nextBeatTimeSec = audioContext.currentTime + 0.02;
       beatIntervalMs = getBeatIntervalMs();
@@ -1031,6 +1142,18 @@
 
       scheduleBeatLoop();
       startGraphLoop();
+      const runDurationMs = getRunDurationMs();
+      sessionEndTimeMs = runDurationMs > 0 ? performance.now() + runDurationMs : 0;
+      updateSessionStats();
+      clearSessionStatsTimer();
+      sessionStatsTimer = setInterval(updateSessionStats, 200);
+      if (runDurationMs > 0) {
+        runDurationTimeout = setTimeout(() => {
+          if (isRunning) {
+            stop("finished");
+          }
+        }, runDurationMs);
+      }
     } catch (error) {
       const errorText = formatError(error);
       setStatus("Mic permission/device error: " + errorText, true);
@@ -1040,7 +1163,7 @@
     }
   }
 
-  function stop() {
+  function stop(reason) {
     if (isCalibrationSession) {
       stopCalibrationSession(false);
       return;
@@ -1059,7 +1182,12 @@
 
     startButton.disabled = false;
     stopButton.disabled = true;
-    setStatus("Stopped");
+    if (reason === "finished") {
+      setStatus("Run finished - review your score");
+    } else {
+      setStatus("Stopped");
+    }
+    updateSessionStats();
   }
 
   bpmInput.addEventListener("input", updateBpmUI);
@@ -1073,7 +1201,6 @@
   startButton.addEventListener("click", start);
   stopButton.addEventListener("click", stop);
   calibrateButton.addEventListener("click", startCalibration);
-  resetScoreButton.addEventListener("click", resetScore);
 
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener("devicechange", () => refreshInputDevices(false));
@@ -1089,6 +1216,7 @@
   resetInputLevelUI();
   resetTempoGraph();
   resetWaveformGraph();
+  updateSessionStats();
   setCalibrationInfo("Calibration: none");
   setDeviceInfo("Click Detect Inputs to request access and list devices.");
   updateDiagnostics();
