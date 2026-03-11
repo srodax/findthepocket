@@ -80,6 +80,9 @@
   const GRAPH_WINDOW_MS = 15000;
   const SCORING_WINDOW_HITS = 12;
   const WAVEFORM_WINDOW_MS = 2500;
+  const TIGHT_MS = 5;
+  const BORDERLINE_MS = 10;
+  const LOOSE_MS = 20;
 
   function getBeatIntervalMs() {
     const bpm = Number(bpmInput.value);
@@ -241,23 +244,33 @@
     }
     const instability = mad(diffs);
 
-    const accuracyScore = clamp(100 - Math.abs(currentCenteredError) * 1.4, 0, 100);
-    const consistencyScore = clamp(100 - jitter * 2.0, 0, 100);
-    const stabilityScore = clamp(100 - instability * 2.3, 0, 100);
-    const pocketScore = clamp(100 - Math.abs(bias - targetMs) * 1.2, 0, 100);
+    const absCurrentError = Math.abs(currentCenteredError);
+    let accuracyScore = 0;
+    if (absCurrentError < TIGHT_MS) {
+      accuracyScore = 100;
+    } else if (absCurrentError < BORDERLINE_MS) {
+      accuracyScore = 70 + ((BORDERLINE_MS - absCurrentError) / (BORDERLINE_MS - TIGHT_MS)) * 30;
+    } else if (absCurrentError < LOOSE_MS) {
+      accuracyScore = ((LOOSE_MS - absCurrentError) / (LOOSE_MS - BORDERLINE_MS)) * 70;
+    }
+    const consistencyScore = clamp(100 - (jitter / LOOSE_MS) * 100, 0, 100);
+    const stabilityScore = clamp(100 - (instability / LOOSE_MS) * 100, 0, 100);
+    const pocketScore = clamp(100 - (Math.abs(bias - targetMs) / LOOSE_MS) * 100, 0, 100);
 
     const weightedScore =
       accuracyScore * 0.45 +
       consistencyScore * 0.3 +
       stabilityScore * 0.15 +
       pocketScore * 0.1;
+    const isScorable = absCurrentError < LOOSE_MS;
 
     return {
-      points: Math.round(weightedScore),
+      points: isScorable ? Math.round(weightedScore) : 0,
       accuracyScore,
       consistencyScore,
       stabilityScore,
-      pocketScore
+      pocketScore,
+      isScorable
     };
   }
 
@@ -276,10 +289,18 @@
       diffs.push(centeredErrors[i] - centeredErrors[i - 1]);
     }
     const instability = mad(diffs);
-    const accuracyScore = clamp(100 - Math.abs(currentCenteredError) * 1.4, 0, 100);
-    const consistencyScore = clamp(100 - jitter * 2.0, 0, 100);
-    const stabilityScore = clamp(100 - instability * 2.3, 0, 100);
-    const pocketScore = clamp(100 - Math.abs(bias - targetMs) * 1.2, 0, 100);
+    const absCurrentError = Math.abs(currentCenteredError);
+    let accuracyScore = 0;
+    if (absCurrentError < TIGHT_MS) {
+      accuracyScore = 100;
+    } else if (absCurrentError < BORDERLINE_MS) {
+      accuracyScore = 70 + ((BORDERLINE_MS - absCurrentError) / (BORDERLINE_MS - TIGHT_MS)) * 30;
+    } else if (absCurrentError < LOOSE_MS) {
+      accuracyScore = ((LOOSE_MS - absCurrentError) / (LOOSE_MS - BORDERLINE_MS)) * 70;
+    }
+    const consistencyScore = clamp(100 - (jitter / LOOSE_MS) * 100, 0, 100);
+    const stabilityScore = clamp(100 - (instability / LOOSE_MS) * 100, 0, 100);
+    const pocketScore = clamp(100 - (Math.abs(bias - targetMs) / LOOSE_MS) * 100, 0, 100);
     const weightedScore =
       accuracyScore * 0.45 +
       consistencyScore * 0.3 +
@@ -295,18 +316,9 @@
   }
 
   function getGraphErrorRange(samples) {
-    const values = [0];
-    for (let i = 0; i < samples.length; i += 1) {
-      values.push(samples[i].errorMs);
-    }
-    let maxAbs = 20;
-    for (let i = 0; i < values.length; i += 1) {
-      maxAbs = Math.max(maxAbs, Math.abs(values[i]));
-    }
-    maxAbs = Math.min(220, Math.ceil((maxAbs + 10) / 10) * 10);
     return {
-      min: -maxAbs,
-      max: maxAbs
+      min: -35,
+      max: 35
     };
   }
 
@@ -334,32 +346,76 @@
     const windowStart = nowMs - GRAPH_WINDOW_MS;
 
     ctx.clearRect(0, 0, width, height);
-    ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
-    ctx.textAlign = "left";
+    ctx.font = "10px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+    ctx.textAlign = "right";
     ctx.textBaseline = "middle";
 
+    function fillBand(minMs, maxMs, color) {
+      const top = valueToY(maxMs, range.min, range.max, height);
+      const bottom = valueToY(minMs, range.min, range.max, height);
+      const bandTop = Math.min(top, bottom);
+      const bandHeight = Math.abs(bottom - top);
+      ctx.fillStyle = color;
+      ctx.fillRect(leftPad, bandTop, width - leftPad - rightPad, bandHeight);
+    }
+
+    // Sloppy regions (subdued red): [-20,-10] and [10,20]
+    fillBand(-LOOSE_MS, -BORDERLINE_MS, "rgba(210, 86, 86, 0.16)");
+    fillBand(BORDERLINE_MS, LOOSE_MS, "rgba(210, 86, 86, 0.16)");
+    // Borderline regions (subdued yellow): [-10,-5] and [5,10]
+    fillBand(-BORDERLINE_MS, -TIGHT_MS, "rgba(230, 182, 82, 0.14)");
+    fillBand(TIGHT_MS, BORDERLINE_MS, "rgba(230, 182, 82, 0.14)");
+    // Tight region (subdued green): [-5,5]
+    fillBand(-TIGHT_MS, TIGHT_MS, "rgba(98, 194, 142, 0.16)");
+
+    // Draw guide lines and labels after region fills.
     ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
     ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i += 1) {
-      const errorMs = range.max - (i / 4) * (range.max - range.min);
+    const thresholdLines = [-30, -20, -10, -5, 0, 5, 10, 20, 30];
+    for (let i = 0; i < thresholdLines.length; i += 1) {
+      const errorMs = thresholdLines[i];
       const y = valueToY(errorMs, range.min, range.max, height);
+      if (errorMs === 0) {
+        ctx.strokeStyle = "rgba(132, 236, 176, 0.95)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+      } else if (Math.abs(errorMs) === 30) {
+        ctx.strokeStyle = "rgba(245, 247, 252, 0.28)";
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([5, 4]);
+      } else {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([]);
+      }
       ctx.beginPath();
       ctx.moveTo(leftPad, y);
       ctx.lineTo(width - rightPad, y);
       ctx.stroke();
-      ctx.fillStyle = "rgba(245, 247, 252, 0.8)";
+      ctx.setLineDash([]);
+      ctx.fillStyle = Math.abs(errorMs) === 30 ? "rgba(245, 247, 252, 0.8)" : "rgba(245, 247, 252, 0.68)";
       const rounded = Math.round(errorMs);
       const label = rounded > 0 ? "+" + rounded + " ms" : rounded + " ms";
-      ctx.fillText(label, 6, y);
+      ctx.fillText(label, leftPad - 4, y);
     }
 
-    const targetY = valueToY(0, range.min, range.max, height);
-    ctx.strokeStyle = "rgba(89, 220, 157, 0.95)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(leftPad, targetY);
-    ctx.lineTo(width - rightPad, targetY);
-    ctx.stroke();
+    // Zone labels on negative side, bottom-right in each band.
+    ctx.font = "10px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    const zoneLabelX = leftPad + 6;
+    ctx.fillStyle = "rgba(210, 86, 86, 0.72)";
+    ctx.fillText("loose", zoneLabelX, valueToY(-LOOSE_MS, range.min, range.max, height) - 4);
+    ctx.fillStyle = "rgba(198, 202, 210, 0.62)";
+    ctx.fillText("sloppy", zoneLabelX, valueToY(-30, range.min, range.max, height) - 4);
+    ctx.fillStyle = "rgba(230, 182, 82, 0.62)";
+    ctx.fillText(
+      "borderline",
+      zoneLabelX,
+      valueToY(-BORDERLINE_MS, range.min, range.max, height) - 4
+    );
+    ctx.fillStyle = "rgba(98, 194, 142, 0.52)";
+    ctx.fillText("tight", zoneLabelX, valueToY(-TIGHT_MS, range.min, range.max, height) - 4);
 
     if (offsetSamples.length > 0) {
       ctx.strokeStyle = "rgba(255, 205, 84, 0.98)";
@@ -733,21 +789,29 @@
     const correctedSignedError = getCalibratedSignedError(rawErrorMs);
     const score = getMusicalScore(correctedSignedError);
     const points = score.points;
-    const componentPoints = distributeComponentPoints(points, score);
     updateSubScoreUI(score.accuracyScore, score.consistencyScore, score.stabilityScore);
+
+    const roundedError = Math.round(correctedSignedError);
+    lastErrorEl.textContent = roundedError > 0 ? "+" + roundedError : String(roundedError);
+    lastPointsEl.textContent = String(points);
+    const isPlottable = Math.abs(correctedSignedError) <= 30;
+    if (isPlottable) {
+      addOffsetSample(hitTimeMs, correctedSignedError);
+    }
+
+    const widthPercent = clamp(points, 0, 100);
+    accuracyBar.style.width = widthPercent + "%";
+
+    if (!score.isScorable) {
+      return;
+    }
+
+    const componentPoints = distributeComponentPoints(points, score);
     sessionSumAccuracy += componentPoints.accuracy;
     sessionSumConsistency += componentPoints.consistency;
     sessionSumStability += componentPoints.stability;
     sessionSumPocket += componentPoints.pocket;
     updateSessionBreakdownUI();
-
-    const roundedError = Math.round(correctedSignedError);
-    lastErrorEl.textContent = roundedError > 0 ? "+" + roundedError : String(roundedError);
-    lastPointsEl.textContent = String(points);
-    addOffsetSample(hitTimeMs, correctedSignedError);
-
-    const widthPercent = clamp(points, 0, 100);
-    accuracyBar.style.width = widthPercent + "%";
 
     totalScore += points;
     hitCount += 1;

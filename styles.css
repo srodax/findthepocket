@@ -132,7 +132,7 @@ button:disabled {
 .tempo-graph {
   display: block;
   width: 100%;
-  height: 170px;
+  height: 220px;
   margin: 0 0 10px;
   border-radius: 8px;
   border: 1px solid #e2e1db;
