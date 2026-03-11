@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Metronome Challenge</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <h1>Metronome Challenge</h1>
+
+      <section class="controls card">
+        <div class="row">
+          <label for="bpm">BPM</label>
+          <input id="bpm" type="range" min="40" max="240" value="100" step="1" />
+          <output id="bpmValue" for="bpm">100</output>
+        </div>
+
+        <div class="row">
+          <label for="inputDevice">Input Device</label>
+          <select id="inputDevice"></select>
+          <button id="refreshDevices" type="button">Detect Inputs</button>
+        </div>
+        <p id="deviceInfo" class="small">Click Detect Inputs to request access and list devices.</p>
+        <p id="diagnostics" class="small">
+          Context: checking browser capabilities...
+        </p>
+
+        <div class="row threshold-row">
+          <label for="threshold">Mic Sensitivity</label>
+          <input id="threshold" type="range" min="0" max="1" value="0.8" step="0.01" />
+          <output id="thresholdValue" for="threshold">0.80</output>
+        </div>
+
+        <div class="buttons">
+          <button id="startButton" type="button">Start</button>
+          <button id="stopButton" type="button" disabled>Stop</button>
+          <button id="calibrateButton" type="button">Calibrate</button>
+          <button id="resetScoreButton" type="button">Reset Score</button>
+        </div>
+        <p id="calibrationInfo" class="small">Calibration: none</p>
+      </section>
+
+      <section class="feedback card">
+        <div id="beatFlash" class="beat-flash" aria-hidden="true"></div>
+        <p class="status" id="statusText">Ready</p>
+        <p class="meter-label">Input Level: <span id="inputLevelValue">0%</span></p>
+        <div class="level-wrap">
+          <div id="inputLevelBar" class="level-bar"></div>
+        </div>
+        <div class="accuracy-wrap">
+          <div id="accuracyBar" class="accuracy-bar"></div>
+        </div>
+        <p class="timing">
+          Last error: <span id="lastError">--</span> ms
+          <span id="lastPointsWrap">| points: <span id="lastPoints">--</span></span>
+        </p>
+      </section>
+
+      <section class="score card">
+        <p>Total score</p>
+        <p id="totalScore" class="score-number">0</p>
+        <p id="hitCount" class="small">Hits: 0</p>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
