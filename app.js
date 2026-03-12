@@ -95,7 +95,7 @@
   let calibrationJitterMs = 5;
   let isCalibrating = false;
   let calibrationSamples = [];
-  const CALIBRATION_SAMPLE_COUNT = 16;
+  const CALIBRATION_SAMPLE_COUNT = 24;
   const COUNT_IN_BEATS = 4;
   const SCHEDULE_AHEAD_SEC = 0.12;
   const SCHEDULER_LOOKAHEAD_MS = 25;
@@ -1249,7 +1249,7 @@
       startButton.disabled = true;
       stopButton.disabled = true;
       calibrateButton.disabled = true;
-      setStatus("Calibrating... play steady for 16 beats");
+      setStatus("Calibrating... play steady for " + CALIBRATION_SAMPLE_COUNT + " beats");
       setCalibrationInfo("Calibration: collecting samples (0/" + CALIBRATION_SAMPLE_COUNT + ")");
 
       scheduleBeatLoop();
