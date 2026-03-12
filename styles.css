@@ -168,6 +168,12 @@ button:disabled {
   padding: 0 10px;
 }
 
+#tempoYResetButton,
+#tempoYAutoButton {
+  width: auto;
+  padding: 0 10px;
+}
+
 .session-timers {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -24,10 +24,18 @@
   const zoomOutButton = document.getElementById("zoomOutButton");
   const zoomInButton = document.getElementById("zoomInButton");
   const zoomLabel = document.getElementById("zoomLabel");
+  const tempoZoomLabel = document.getElementById("tempoZoomLabel");
   const waveformYZoomOutButton = document.getElementById("waveformYZoomOutButton");
   const waveformYZoomInButton = document.getElementById("waveformYZoomInButton");
   const waveformYZoomLabel = document.getElementById("waveformYZoomLabel");
   const waveformAutoZoomButton = document.getElementById("waveformAutoZoomButton");
+  const tempoZoomOutButton = document.getElementById("tempoZoomOutButton");
+  const tempoZoomInButton = document.getElementById("tempoZoomInButton");
+  const tempoYZoomOutButton = document.getElementById("tempoYZoomOutButton");
+  const tempoYZoomInButton = document.getElementById("tempoYZoomInButton");
+  const tempoYZoomLabel = document.getElementById("tempoYZoomLabel");
+  const tempoYResetButton = document.getElementById("tempoYResetButton");
+  const tempoYAutoButton = document.getElementById("tempoYAutoButton");
   const liveTempoValue = document.getElementById("liveTempoValue");
   const tempoGraph = document.getElementById("tempoGraph");
   const accuracyBar = document.getElementById("accuracyBar");
@@ -99,6 +107,7 @@
   let historyViewWindowMs = 15000;
   let waveformYZoom = 1;
   let waveformQualifiedPeakAbsMax = 0;
+  let tempoYHalfRangeMs = 35;
   let calibrationOffsetMs = 0;
   let calibrationJitterMs = 5;
   let isCalibrating = false;
@@ -113,6 +122,9 @@
   const WAVEFORM_Y_ZOOM_MIN = 0.35;
   const WAVEFORM_Y_ZOOM_MAX = 10;
   const WAVEFORM_VERTICAL_FRACTION = 0.5;
+  const TEMPO_Y_HALF_RANGE_DEFAULT_MS = 35;
+  const TEMPO_Y_HALF_RANGE_MIN_MS = 10;
+  const TEMPO_Y_HALF_RANGE_MAX_MS = 160;
   const TIGHT_MS = 5;
   const BORDERLINE_MS = 10;
   const LOOSE_MS = 20;
@@ -228,17 +240,68 @@
   }
 
   function updateZoomLabel() {
-    zoomLabel.textContent = "Window: " + (historyViewWindowMs / 1000).toFixed(1) + "s";
+    const text = "Window: " + (historyViewWindowMs / 1000).toFixed(1) + "s";
+    zoomLabel.textContent = text;
+    if (tempoZoomLabel) {
+      tempoZoomLabel.textContent = text;
+    }
   }
 
   function updateWaveformYZoomLabel() {
     waveformYZoomLabel.textContent = "Y: " + waveformYZoom.toFixed(2) + "x";
   }
 
+  function updateTempoYZoomLabel() {
+    tempoYZoomLabel.textContent = "Y: +/-" + Math.round(tempoYHalfRangeMs) + " ms";
+  }
+
   function changeWaveformYZoom(factor) {
     waveformYZoom = clamp(waveformYZoom * factor, WAVEFORM_Y_ZOOM_MIN, WAVEFORM_Y_ZOOM_MAX);
     updateWaveformYZoomLabel();
     drawWaveformGraph(performance.now());
+  }
+
+  function setTempoYHalfRange(nextHalfRangeMs) {
+    tempoYHalfRangeMs = clamp(
+      Math.round(nextHalfRangeMs),
+      TEMPO_Y_HALF_RANGE_MIN_MS,
+      TEMPO_Y_HALF_RANGE_MAX_MS
+    );
+    updateTempoYZoomLabel();
+    drawTempoGraph(performance.now());
+  }
+
+  function changeTempoYZoom(factor) {
+    setTempoYHalfRange(tempoYHalfRangeMs * factor);
+  }
+
+  function resetTempoYZoom() {
+    setTempoYHalfRange(TEMPO_Y_HALF_RANGE_DEFAULT_MS);
+  }
+
+  function autoTempoYZoom() {
+    if (!offsetSamples.length) {
+      setStatus("Auto Y needs timing samples to measure", true);
+      return;
+    }
+    let maxAbsError = 0;
+    for (let i = 0; i < offsetSamples.length; i += 1) {
+      maxAbsError = Math.max(maxAbsError, Math.abs(offsetSamples[i].errorMs));
+    }
+    if (maxAbsError <= 0.5) {
+      setTempoYHalfRange(TEMPO_Y_HALF_RANGE_DEFAULT_MS);
+      setStatus("Auto Y reset to default range");
+      return;
+    }
+    const padded = maxAbsError * 1.2;
+    const roundedTo10 = Math.ceil(padded / 10) * 10;
+    const target = clamp(
+      roundedTo10,
+      TEMPO_Y_HALF_RANGE_MIN_MS,
+      TEMPO_Y_HALF_RANGE_MAX_MS
+    );
+    setTempoYHalfRange(target);
+    setStatus("Auto Y aligned to recorded offset spread");
   }
 
   function registerQualifiedWaveformSpike(peakAbsRaw) {
@@ -554,10 +617,10 @@
     return graphHeight - normalized * graphHeight;
   }
 
-  function getGraphErrorRange(samples) {
+  function getGraphErrorRange() {
     return {
-      min: -35,
-      max: 35
+      min: -tempoYHalfRangeMs,
+      max: tempoYHalfRangeMs
     };
   }
 
@@ -578,7 +641,7 @@
     const grooveToLabelGap = 24;
     const leftPad = grooveBarLeft + grooveBarWidth + grooveToLabelGap + 28;
     const rightPad = 8;
-    const range = getGraphErrorRange(offsetSamples);
+    const range = getGraphErrorRange();
     const viewport = getViewportRange(nowMs);
     const windowStart = viewport.startMs;
     const viewportSpanMs = Math.max(1, viewport.endMs - viewport.startMs);
@@ -626,7 +689,16 @@
     // Draw guide lines and labels after region fills.
     ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
     ctx.lineWidth = 1;
-    const thresholdLines = [-30, -20, -10, -5, 0, 5, 10, 20, 30];
+    const thresholdLines = [];
+    for (let errorMs = -30; errorMs <= 30; errorMs += 10) {
+      thresholdLines.push(errorMs);
+    }
+    thresholdLines.push(-5, 5);
+    thresholdLines.sort((a, b) => a - b);
+    const roundedHalfRange = Math.floor(range.max / 10) * 10;
+    for (let errorMs = 40; errorMs <= roundedHalfRange; errorMs += 10) {
+      thresholdLines.push(-errorMs, errorMs);
+    }
     for (let i = 0; i < thresholdLines.length; i += 1) {
       const errorMs = thresholdLines[i];
       const y = valueToY(errorMs, range.min, range.max, height);
@@ -634,6 +706,10 @@
         ctx.strokeStyle = "rgba(132, 236, 176, 0.95)";
         ctx.lineWidth = 2;
         ctx.setLineDash([]);
+      } else if (Math.abs(errorMs) > 30 && Math.abs(errorMs) % 10 === 0) {
+        ctx.strokeStyle = "rgba(245, 247, 252, 0.35)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
       } else if (Math.abs(errorMs) === 30) {
         ctx.strokeStyle = "rgba(245, 247, 252, 0.28)";
         ctx.lineWidth = 1.4;
@@ -648,7 +724,12 @@
       ctx.lineTo(width - rightPad, y);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = Math.abs(errorMs) === 30 ? "rgba(245, 247, 252, 0.8)" : "rgba(245, 247, 252, 0.68)";
+      ctx.fillStyle =
+        Math.abs(errorMs) > 30
+          ? "rgba(245, 247, 252, 0.52)"
+          : Math.abs(errorMs) === 30
+            ? "rgba(245, 247, 252, 0.8)"
+            : "rgba(245, 247, 252, 0.68)";
       const rounded = Math.round(errorMs);
       const label = rounded > 0 ? "+" + rounded + " ms" : rounded + " ms";
       ctx.fillText(label, leftPad - 4, y);
@@ -674,11 +755,11 @@
 
     if (offsetSamples.length > 0) {
       const startIdx = Math.max(0, lowerBoundByTime(offsetSamples, viewport.startMs) - 1);
-      const yTopSloppy = valueToY(30, range.min, range.max, height);
-      const yBottomSloppy = valueToY(-30, range.min, range.max, height);
+      const plotWidth = width - leftPad - rightPad;
+      // Keep traces constrained to plot area (not over y-axis labels).
       ctx.save();
       ctx.beginPath();
-      ctx.rect(leftPad, Math.min(yTopSloppy, yBottomSloppy), width - leftPad - rightPad, Math.abs(yBottomSloppy - yTopSloppy));
+      ctx.rect(leftPad, 0, plotWidth, height);
       ctx.clip();
       ctx.strokeStyle = "rgba(255, 205, 84, 0.98)";
       ctx.lineWidth = 2.5;
@@ -687,9 +768,7 @@
       for (let i = startIdx; i < offsetSamples.length; i += 1) {
         const sample = offsetSamples[i];
         const isPastViewport = sample.timeMs > viewport.endMs;
-        const x =
-          leftPad +
-          ((sample.timeMs - windowStart) / viewportSpanMs) * (width - leftPad - rightPad);
+        const x = leftPad + ((sample.timeMs - windowStart) / viewportSpanMs) * plotWidth;
         const y = valueToY(sample.errorMs, range.min, range.max, height);
         if (!hasLinePoint) {
           ctx.moveTo(x, y);
@@ -704,7 +783,6 @@
       if (hasLinePoint) {
         ctx.stroke();
       }
-      ctx.restore();
 
       ctx.fillStyle = "rgba(255, 205, 84, 1)";
       for (let i = startIdx; i < offsetSamples.length; i += 1) {
@@ -715,14 +793,13 @@
         if (!sample.showPoint) {
           continue;
         }
-        const x =
-          leftPad +
-          ((sample.timeMs - windowStart) / viewportSpanMs) * (width - leftPad - rightPad);
+        const x = leftPad + ((sample.timeMs - windowStart) / viewportSpanMs) * plotWidth;
         const y = valueToY(sample.errorMs, range.min, range.max, height);
         ctx.beginPath();
         ctx.arc(x, y, 2.2, 0, Math.PI * 2);
         ctx.fill();
       }
+      ctx.restore();
     }
 
     if (hoverTimeMs !== null && hoverTimeMs >= viewport.startMs && hoverTimeMs <= viewport.endMs) {
@@ -1365,7 +1442,7 @@
     if (isPlottable) {
       registerQualifiedWaveformSpike(peakAbsRaw);
     }
-    addOffsetSample(hitTimeMs, correctedSignedError, isPlottable);
+    addOffsetSample(hitTimeMs, correctedSignedError, true);
 
     const widthPercent = clamp(points * 100, 0, 100);
     accuracyBar.style.width = widthPercent + "%";
@@ -1542,7 +1619,7 @@
       if (isPlottable) {
         registerQualifiedWaveformSpike(peakAbsRaw);
       }
-      addOffsetSample(hitTimeMs, correctedSignedError, isPlottable);
+      addOffsetSample(hitTimeMs, correctedSignedError, true);
     }
   }
 
@@ -1989,6 +2066,12 @@
   waveformYZoomInButton.addEventListener("click", () => changeWaveformYZoom(1.25));
   waveformYZoomOutButton.addEventListener("click", () => changeWaveformYZoom(0.8));
   waveformAutoZoomButton.addEventListener("click", autoWaveformYZoom);
+  tempoZoomInButton.addEventListener("click", () => changeHistoryZoom(0.7));
+  tempoZoomOutButton.addEventListener("click", () => changeHistoryZoom(1.4));
+  tempoYZoomInButton.addEventListener("click", () => changeTempoYZoom(0.8));
+  tempoYZoomOutButton.addEventListener("click", () => changeTempoYZoom(1.25));
+  tempoYResetButton.addEventListener("click", resetTempoYZoom);
+  tempoYAutoButton.addEventListener("click", autoTempoYZoom);
   waveformGraph.addEventListener("mousemove", (event) => handleGraphHoverMove(event, waveformGraph));
   tempoGraph.addEventListener("mousemove", (event) => handleGraphHoverMove(event, tempoGraph));
   waveformGraph.addEventListener("mouseleave", handleGraphHoverLeave);
@@ -2013,6 +2096,7 @@
   resetWaveformGraph();
   updateZoomLabel();
   updateWaveformYZoomLabel();
+  updateTempoYZoomLabel();
   updateSessionStats();
   setCalibrationInfo("Calibration: none");
   setDeviceInfo("Click Detect Inputs to request access and list devices.");

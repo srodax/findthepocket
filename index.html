@@ -95,6 +95,16 @@
         </div>
         <p class="meter-label">Live Offset: <span id="liveTempoValue">--</span> ms</p>
         <canvas id="tempoGraph" class="tempo-graph" width="700" height="220"></canvas>
+        <div class="graph-zoom">
+          <button id="tempoZoomOutButton" type="button" title="Zoom out timeline">-</button>
+          <span id="tempoZoomLabel" class="small">Window: 15.0s</span>
+          <button id="tempoZoomInButton" type="button" title="Zoom in timeline">+</button>
+          <button id="tempoYZoomOutButton" type="button" title="Offset graph Y zoom out">Y-</button>
+          <span id="tempoYZoomLabel" class="small">Y: +/-35 ms</span>
+          <button id="tempoYZoomInButton" type="button" title="Offset graph Y zoom in">Y+</button>
+          <button id="tempoYResetButton" type="button" title="Reset offset graph Y range">Reset Y</button>
+          <button id="tempoYAutoButton" type="button" title="Auto offset graph Y range">Auto Y</button>
+        </div>
         <div class="accuracy-wrap">
           <div id="accuracyBar" class="accuracy-bar"></div>
         </div>
