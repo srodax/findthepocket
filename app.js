@@ -64,6 +64,7 @@
   let graphTimer = null;
   let activeDeviceId = "";
   let lastDetectedAt = 0;
+  let isCountInActive = false;
 
   let totalScore = 0;
   let hitCount = 0;
@@ -95,6 +96,7 @@
   let isCalibrating = false;
   let calibrationSamples = [];
   const CALIBRATION_SAMPLE_COUNT = 16;
+  const COUNT_IN_BEATS = 4;
   const SCHEDULE_AHEAD_SEC = 0.12;
   const SCHEDULER_LOOKAHEAD_MS = 25;
   const SCORING_WINDOW_HITS = 12;
@@ -1039,6 +1041,23 @@
     osc.stop(timeSec + 0.05);
   }
 
+  function playCountInClick(timeSec) {
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(1240, timeSec);
+
+    gain.gain.setValueAtTime(0.0001, timeSec);
+    gain.gain.exponentialRampToValueAtTime(0.2, timeSec + 0.001);
+    gain.gain.exponentialRampToValueAtTime(0.0001, timeSec + 0.045);
+
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+    osc.start(timeSec);
+    osc.stop(timeSec + 0.055);
+  }
+
   function flashBeat() {
     beatFlash.classList.add("active");
     if (flashTimeout) {
@@ -1057,6 +1076,48 @@
   function scheduleVisualFlash(beatTimeSec) {
     const delayMs = Math.max(0, (beatTimeSec - audioContext.currentTime) * 1000);
     setTimeout(flashBeat, delayMs);
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  async function runCountIn() {
+    if (!audioContext) {
+      throw new Error("Audio context not ready for count-in");
+    }
+    isCountInActive = true;
+    startButton.disabled = true;
+    stopButton.disabled = true;
+    calibrateButton.disabled = true;
+
+    const beatMs = getBeatIntervalMs();
+    const beatSec = beatMs / 1000;
+    const firstCountInBeatSec = audioContext.currentTime + 0.08;
+    for (let i = 0; i < COUNT_IN_BEATS; i += 1) {
+      const clickTimeSec = firstCountInBeatSec + i * beatSec;
+      playCountInClick(clickTimeSec);
+      scheduleVisualFlash(clickTimeSec);
+      const labelBeat = i + 1;
+      const statusDelayMs = Math.max(0, (clickTimeSec - audioContext.currentTime) * 1000);
+      setTimeout(() => {
+        if (isCountInActive) {
+          setStatus("Count-in " + labelBeat + "/" + COUNT_IN_BEATS);
+        }
+      }, statusDelayMs);
+    }
+
+    const sessionStartBeatSec = firstCountInBeatSec + COUNT_IN_BEATS * beatSec;
+    const schedulerLeadMs = Math.max(SCHEDULER_LOOKAHEAD_MS * 2, 20);
+    const waitMs = Math.max(
+      0,
+      (sessionStartBeatSec - audioContext.currentTime) * 1000 - schedulerLeadMs
+    );
+    await delay(waitMs);
+    isCountInActive = false;
+    return sessionStartBeatSec;
   }
 
   function scheduleBeatLoop() {
@@ -1139,7 +1200,7 @@
   }
 
   function startCalibration() {
-    if (isCalibrationSession) {
+    if (isCalibrationSession || isCountInActive) {
       return;
     }
     if (isRunning) {
@@ -1173,12 +1234,13 @@
       await ensureAudioContext();
       await setupMicInput();
       await refreshInputDevices(false);
+      const sessionStartBeatSec = await runCountIn();
 
       isCalibrationSession = true;
       isCalibrating = true;
       calibrationSamples = [];
       beatTimes = [];
-      nextBeatTimeSec = audioContext.currentTime + 0.02;
+      nextBeatTimeSec = sessionStartBeatSec;
       beatIntervalMs = getBeatIntervalMs();
       lastDetectedAt = 0;
       lastScoredBeatTimeMs = 0;
@@ -1196,6 +1258,9 @@
       const errorText = formatError(error);
       isCalibrationSession = false;
       isCalibrating = false;
+      isCountInActive = false;
+      startButton.disabled = false;
+      stopButton.disabled = true;
       calibrateButton.disabled = false;
       setStatus("Calibration setup failed: " + errorText, true);
       updateDiagnostics("lastError=" + errorText);
@@ -1506,7 +1571,7 @@
   }
 
   async function start() {
-    if (isRunning || isCalibrationSession) {
+    if (isRunning || isCalibrationSession || isCountInActive) {
       return;
     }
 
@@ -1517,6 +1582,7 @@
       setStatus("Requesting microphone permission...");
       await setupMicInput();
       await refreshInputDevices(false);
+      const sessionStartBeatSec = await runCountIn();
 
       isRunning = true;
       resetScore();
@@ -1528,7 +1594,7 @@
       historyScrollVelocityMs = 0;
       lastWheelDirection = 0;
       beatTimes = [];
-      nextBeatTimeSec = audioContext.currentTime + 0.02;
+      nextBeatTimeSec = sessionStartBeatSec;
       beatIntervalMs = getBeatIntervalMs();
       lastDetectedAt = 0;
       lastScoredBeatTimeMs = 0;
@@ -1537,6 +1603,7 @@
 
       startButton.disabled = true;
       stopButton.disabled = false;
+      calibrateButton.disabled = true;
       setStatus("Running - tap, clap, or strike to score");
 
       const runDurationMs = getRunDurationMs();
@@ -1553,6 +1620,10 @@
       }, runDurationMs);
     } catch (error) {
       const errorText = formatError(error);
+      isCountInActive = false;
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      calibrateButton.disabled = false;
       setStatus("Mic permission/device error: " + errorText, true);
       cleanupMic();
       resetInputLevelUI();
@@ -1583,6 +1654,7 @@
 
     startButton.disabled = false;
     stopButton.disabled = true;
+    calibrateButton.disabled = false;
     if (reason === "finished") {
       setStatus("Run finished - review your score");
     } else {
