@@ -70,6 +70,15 @@
         </div>
         <p class="meter-label">Raw Input Waveform</p>
         <canvas id="waveformGraph" class="waveform-graph" width="700" height="130"></canvas>
+        <div class="graph-zoom">
+          <button id="zoomOutButton" type="button" title="Zoom out timeline">-</button>
+          <span id="zoomLabel" class="small">Window: 15.0s</span>
+          <button id="zoomInButton" type="button" title="Zoom in timeline">+</button>
+          <button id="waveformYZoomOutButton" type="button" title="Waveform Y zoom out">Y-</button>
+          <span id="waveformYZoomLabel" class="small">Y: 1.00x</span>
+          <button id="waveformYZoomInButton" type="button" title="Waveform Y zoom in">Y+</button>
+          <button id="waveformAutoZoomButton" type="button" title="Auto waveform Y zoom">Auto Y</button>
+        </div>
         <div class="session-timers" aria-live="polite">
           <div class="timer-card">
             <p class="timer-label">Time Left</p>

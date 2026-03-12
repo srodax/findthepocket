@@ -149,6 +149,25 @@ button:disabled {
   background: linear-gradient(180deg, #1f273f 0%, #182036 100%);
 }
 
+.graph-zoom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 10px;
+}
+
+.graph-zoom button {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  line-height: 1;
+}
+
+#waveformAutoZoomButton {
+  width: auto;
+  padding: 0 10px;
+}
+
 .session-timers {
   display: grid;
   grid-template-columns: 1fr 1fr;

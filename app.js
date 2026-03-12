@@ -20,6 +20,13 @@
   const inputLevelBar = document.getElementById("inputLevelBar");
   const inputLevelValue = document.getElementById("inputLevelValue");
   const waveformGraph = document.getElementById("waveformGraph");
+  const zoomOutButton = document.getElementById("zoomOutButton");
+  const zoomInButton = document.getElementById("zoomInButton");
+  const zoomLabel = document.getElementById("zoomLabel");
+  const waveformYZoomOutButton = document.getElementById("waveformYZoomOutButton");
+  const waveformYZoomInButton = document.getElementById("waveformYZoomInButton");
+  const waveformYZoomLabel = document.getElementById("waveformYZoomLabel");
+  const waveformAutoZoomButton = document.getElementById("waveformAutoZoomButton");
   const liveTempoValue = document.getElementById("liveTempoValue");
   const tempoGraph = document.getElementById("tempoGraph");
   const accuracyBar = document.getElementById("accuracyBar");
@@ -70,6 +77,13 @@
   let sessionSumConsistency = 0;
   let sessionSumStability = 0;
   let sessionSumPocket = 0;
+  let runStartTimeMs = 0;
+  let runEndTimeMs = 0;
+  let historyViewportStartMs = 0;
+  let hoverTimeMs = null;
+  let historyViewWindowMs = 15000;
+  let waveformYZoom = 1;
+  let waveformQualifiedPeakAbsMax = 0;
   let calibrationOffsetMs = 0;
   let calibrationJitterMs = 5;
   let isCalibrating = false;
@@ -77,9 +91,12 @@
   const CALIBRATION_SAMPLE_COUNT = 16;
   const SCHEDULE_AHEAD_SEC = 0.12;
   const SCHEDULER_LOOKAHEAD_MS = 25;
-  const GRAPH_WINDOW_MS = 15000;
   const SCORING_WINDOW_HITS = 12;
-  const WAVEFORM_WINDOW_MS = 2500;
+  const HISTORY_VIEW_WINDOW_MIN_MS = 3000;
+  const HISTORY_VIEW_WINDOW_MAX_MS = 90000;
+  const WAVEFORM_Y_ZOOM_MIN = 0.35;
+  const WAVEFORM_Y_ZOOM_MAX = 10;
+  const WAVEFORM_VERTICAL_FRACTION = 0.5;
   const TIGHT_MS = 5;
   const BORDERLINE_MS = 10;
   const LOOSE_MS = 20;
@@ -160,8 +177,153 @@
     hitsLeftValueEl.textContent = String(hitsLeft);
   }
 
+  function updateZoomLabel() {
+    zoomLabel.textContent = "Window: " + (historyViewWindowMs / 1000).toFixed(1) + "s";
+  }
+
+  function updateWaveformYZoomLabel() {
+    waveformYZoomLabel.textContent = "Y: " + waveformYZoom.toFixed(2) + "x";
+  }
+
+  function changeWaveformYZoom(factor) {
+    waveformYZoom = clamp(waveformYZoom * factor, WAVEFORM_Y_ZOOM_MIN, WAVEFORM_Y_ZOOM_MAX);
+    updateWaveformYZoomLabel();
+    drawWaveformGraph(performance.now());
+  }
+
+  function registerQualifiedWaveformSpike(peakAbsRaw) {
+    if (!Number.isFinite(peakAbsRaw) || peakAbsRaw <= 0) {
+      return;
+    }
+    waveformQualifiedPeakAbsMax = Math.max(waveformQualifiedPeakAbsMax, peakAbsRaw);
+  }
+
+  function autoWaveformYZoom() {
+    if (waveformQualifiedPeakAbsMax <= 0.001) {
+      setStatus("Auto Y needs in-beat spikes to measure", true);
+      return;
+    }
+    // Scale so the strongest qualified spike uses most of available vertical range.
+    const targetZoom = clamp(
+      1 / (waveformQualifiedPeakAbsMax * WAVEFORM_VERTICAL_FRACTION),
+      WAVEFORM_Y_ZOOM_MIN,
+      WAVEFORM_Y_ZOOM_MAX
+    );
+    waveformYZoom = targetZoom;
+    updateWaveformYZoomLabel();
+    drawWaveformGraph(performance.now());
+    setStatus("Auto Y aligned to strongest in-beat spike");
+  }
+
+  function changeHistoryZoom(factor) {
+    const previousSpan = historyViewWindowMs;
+    const nextSpan = clamp(
+      Math.round(previousSpan * factor),
+      HISTORY_VIEW_WINDOW_MIN_MS,
+      HISTORY_VIEW_WINDOW_MAX_MS
+    );
+    if (nextSpan === previousSpan) {
+      return;
+    }
+
+    const nowMs = performance.now();
+    const previousViewport = getViewportRange(nowMs);
+    historyViewWindowMs = nextSpan;
+    updateZoomLabel();
+
+    if (hasRunHistory() && !isRunning && !isCalibrationSession) {
+      const previousCenter = (previousViewport.startMs + previousViewport.endMs) / 2;
+      const half = historyViewWindowMs / 2;
+      const maxStart = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
+      historyViewportStartMs = clamp(previousCenter - half, runStartTimeMs, maxStart);
+    }
+
+    drawWaveformGraph(nowMs);
+    drawTempoGraph(nowMs);
+  }
+
+  function hasRunHistory() {
+    return runEndTimeMs > runStartTimeMs;
+  }
+
+  function getViewportRange(nowMs) {
+    if (isRunning || isCalibrationSession) {
+      return {
+        startMs: nowMs - historyViewWindowMs,
+        endMs: nowMs
+      };
+    }
+    if (hasRunHistory()) {
+      const maxStart = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
+      const startMs = clamp(historyViewportStartMs, runStartTimeMs, maxStart);
+      return {
+        startMs,
+        endMs: startMs + historyViewWindowMs
+      };
+    }
+    return {
+      startMs: nowMs - historyViewWindowMs,
+      endMs: nowMs
+    };
+  }
+
+  function getHistoryTimeFromCanvasX(event, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const normalized = clamp(x / rect.width, 0, 1);
+    const nowMs = performance.now();
+    const viewport = getViewportRange(nowMs);
+    return viewport.startMs + normalized * (viewport.endMs - viewport.startMs);
+  }
+
+  function handleGraphHoverMove(event, canvas) {
+    hoverTimeMs = getHistoryTimeFromCanvasX(event, canvas);
+    const nowMs = performance.now();
+    drawWaveformGraph(nowMs);
+    drawTempoGraph(nowMs);
+  }
+
+  function handleGraphHoverLeave() {
+    hoverTimeMs = null;
+    const nowMs = performance.now();
+    drawWaveformGraph(nowMs);
+    drawTempoGraph(nowMs);
+  }
+
+  function handleGraphWheel(event) {
+    if (!hasRunHistory() || isRunning || isCalibrationSession) {
+      return;
+    }
+    const span = runEndTimeMs - runStartTimeMs;
+    if (span <= historyViewWindowMs) {
+      return;
+    }
+    event.preventDefault();
+    const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
+    const shiftMs = delta * 12;
+    const maxStart = runEndTimeMs - historyViewWindowMs;
+    historyViewportStartMs = clamp(historyViewportStartMs + shiftMs, runStartTimeMs, maxStart);
+    const nowMs = performance.now();
+    drawWaveformGraph(nowMs);
+    drawTempoGraph(nowMs);
+  }
+
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+  }
+
+  function lowerBoundByTime(items, timeMs) {
+    let lo = 0;
+    let hi = items.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (items[mid].timeMs < timeMs) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
   }
 
   function median(values) {
@@ -180,6 +342,15 @@
     const center = median(values);
     const deviations = values.map((value) => Math.abs(value - center));
     return median(deviations);
+  }
+
+  function percentile(values, p) {
+    if (!values.length) {
+      return 0;
+    }
+    const sorted = values.slice().sort((a, b) => a - b);
+    const idx = clamp(Math.floor((sorted.length - 1) * p), 0, sorted.length - 1);
+    return sorted[idx];
   }
 
   function getPocketTargetMs() {
@@ -322,11 +493,6 @@
     };
   }
 
-  function pruneTempoSamples(nowMs) {
-    const cutoff = nowMs - GRAPH_WINDOW_MS;
-    offsetSamples = offsetSamples.filter((sample) => sample.timeMs >= cutoff);
-  }
-
   function drawTempoGraph(nowMs) {
     if (!tempoGraph || !tempoGraph.getContext) {
       return;
@@ -337,13 +503,14 @@
       return;
     }
 
-    pruneTempoSamples(nowMs);
     const width = tempoGraph.width;
     const height = tempoGraph.height;
     const leftPad = 42;
     const rightPad = 8;
     const range = getGraphErrorRange(offsetSamples);
-    const windowStart = nowMs - GRAPH_WINDOW_MS;
+    const viewport = getViewportRange(nowMs);
+    const windowStart = viewport.startMs;
+    const viewportSpanMs = Math.max(1, viewport.endMs - viewport.startMs);
 
     ctx.clearRect(0, 0, width, height);
     ctx.font = "10px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
@@ -418,34 +585,68 @@
     ctx.fillText("tight", zoneLabelX, valueToY(-TIGHT_MS, range.min, range.max, height) - 4);
 
     if (offsetSamples.length > 0) {
+      const startIdx = Math.max(0, lowerBoundByTime(offsetSamples, viewport.startMs) - 1);
+      const yTopSloppy = valueToY(30, range.min, range.max, height);
+      const yBottomSloppy = valueToY(-30, range.min, range.max, height);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(leftPad, Math.min(yTopSloppy, yBottomSloppy), width - leftPad - rightPad, Math.abs(yBottomSloppy - yTopSloppy));
+      ctx.clip();
       ctx.strokeStyle = "rgba(255, 205, 84, 0.98)";
       ctx.lineWidth = 2.5;
       ctx.beginPath();
-      for (let i = 0; i < offsetSamples.length; i += 1) {
+      let hasLinePoint = false;
+      for (let i = startIdx; i < offsetSamples.length; i += 1) {
         const sample = offsetSamples[i];
+        const isPastViewport = sample.timeMs > viewport.endMs;
         const x =
           leftPad +
-          ((sample.timeMs - windowStart) / GRAPH_WINDOW_MS) * (width - leftPad - rightPad);
+          ((sample.timeMs - windowStart) / viewportSpanMs) * (width - leftPad - rightPad);
         const y = valueToY(sample.errorMs, range.min, range.max, height);
-        if (i === 0) {
+        if (!hasLinePoint) {
           ctx.moveTo(x, y);
+          hasLinePoint = true;
         } else {
           ctx.lineTo(x, y);
         }
+        if (isPastViewport) {
+          break;
+        }
       }
-      ctx.stroke();
+      if (hasLinePoint) {
+        ctx.stroke();
+      }
+      ctx.restore();
 
       ctx.fillStyle = "rgba(255, 205, 84, 1)";
-      for (let i = 0; i < offsetSamples.length; i += 1) {
+      for (let i = startIdx; i < offsetSamples.length; i += 1) {
         const sample = offsetSamples[i];
+        if (sample.timeMs > viewport.endMs) {
+          break;
+        }
+        if (!sample.showPoint) {
+          continue;
+        }
         const x =
           leftPad +
-          ((sample.timeMs - windowStart) / GRAPH_WINDOW_MS) * (width - leftPad - rightPad);
+          ((sample.timeMs - windowStart) / viewportSpanMs) * (width - leftPad - rightPad);
         const y = valueToY(sample.errorMs, range.min, range.max, height);
         ctx.beginPath();
         ctx.arc(x, y, 2.2, 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+
+    if (hoverTimeMs !== null && hoverTimeMs >= viewport.startMs && hoverTimeMs <= viewport.endMs) {
+      const crossX =
+        leftPad + ((hoverTimeMs - windowStart) / viewportSpanMs) * (width - leftPad - rightPad);
+      ctx.strokeStyle = "rgba(230, 232, 236, 0.46)";
+      ctx.lineWidth = 1.1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(crossX, 0);
+      ctx.lineTo(crossX, height);
+      ctx.stroke();
     }
   }
 
@@ -457,8 +658,6 @@
 
   function addClickMarker(timeMs) {
     clickMarkers.push(timeMs);
-    const cutoff = performance.now() - WAVEFORM_WINDOW_MS;
-    clickMarkers = clickMarkers.filter((time) => time >= cutoff);
   }
 
   function getWaveChunkTiming(nowMs) {
@@ -497,8 +696,6 @@
       const t = timing.startMs + (i / (micData.length - 1)) * timing.spanMs;
       waveformSamples.push({ timeMs: t, value });
     }
-    const cutoff = nowMs - WAVEFORM_WINDOW_MS;
-    waveformSamples = waveformSamples.filter((point) => point.timeMs >= cutoff);
   }
 
   function drawWaveformGraph(nowMs) {
@@ -518,11 +715,9 @@
     const drawWidth = width - leftPad - rightPad;
     const drawHeight = height - topPad - bottomPad;
     const centerY = topPad + drawHeight / 2;
-    const windowStart = nowMs - WAVEFORM_WINDOW_MS;
-
-    const cutoff = nowMs - WAVEFORM_WINDOW_MS;
-    waveformSamples = waveformSamples.filter((point) => point.timeMs >= cutoff);
-    clickMarkers = clickMarkers.filter((time) => time >= cutoff);
+    const viewport = getViewportRange(nowMs);
+    const windowStart = viewport.startMs;
+    const viewportSpanMs = Math.max(1, viewport.endMs - viewport.startMs);
 
     ctx.clearRect(0, 0, width, height);
     ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
@@ -538,7 +733,10 @@
       // Shift visual click markers by learned calibration offset so
       // calibrated "on-beat" spikes line up with marker positions.
       const calibratedMarkerTime = clickMarkers[i] + calibrationOffsetMs;
-      const x = leftPad + ((calibratedMarkerTime - windowStart) / WAVEFORM_WINDOW_MS) * drawWidth;
+      if (calibratedMarkerTime < viewport.startMs || calibratedMarkerTime > viewport.endMs) {
+        continue;
+      }
+      const x = leftPad + ((calibratedMarkerTime - windowStart) / viewportSpanMs) * drawWidth;
       ctx.beginPath();
       ctx.moveTo(x, topPad);
       ctx.lineTo(x, height - bottomPad);
@@ -546,19 +744,37 @@
     }
 
     if (waveformSamples.length > 0) {
+      const startIdx = lowerBoundByTime(waveformSamples, viewport.startMs);
       ctx.strokeStyle = "rgba(255, 206, 110, 0.98)";
       ctx.lineWidth = 1.4;
       ctx.beginPath();
-      for (let i = 0; i < waveformSamples.length; i += 1) {
+      let hasLinePoint = false;
+      for (let i = startIdx; i < waveformSamples.length; i += 1) {
         const point = waveformSamples[i];
-        const x = leftPad + ((point.timeMs - windowStart) / WAVEFORM_WINDOW_MS) * drawWidth;
-        const y = centerY - point.value * (drawHeight * 0.45);
-        if (i === 0) {
+        if (point.timeMs > viewport.endMs) {
+          break;
+        }
+        const x = leftPad + ((point.timeMs - windowStart) / viewportSpanMs) * drawWidth;
+        const y = centerY - point.value * (drawHeight * WAVEFORM_VERTICAL_FRACTION * waveformYZoom);
+        if (!hasLinePoint) {
           ctx.moveTo(x, y);
+          hasLinePoint = true;
         } else {
           ctx.lineTo(x, y);
         }
       }
+      if (hasLinePoint) {
+        ctx.stroke();
+      }
+    }
+
+    if (hoverTimeMs !== null && hoverTimeMs >= viewport.startMs && hoverTimeMs <= viewport.endMs) {
+      const crossX = leftPad + ((hoverTimeMs - windowStart) / viewportSpanMs) * drawWidth;
+      ctx.strokeStyle = "rgba(230, 232, 236, 0.46)";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(crossX, 0);
+      ctx.lineTo(crossX, height);
       ctx.stroke();
     }
   }
@@ -566,6 +782,7 @@
   function resetWaveformGraph() {
     waveformSamples = [];
     clickMarkers = [];
+    waveformQualifiedPeakAbsMax = 0;
     drawWaveformGraph(performance.now());
   }
 
@@ -575,28 +792,85 @@
       return null;
     }
 
-    const threshold = 0.2 - sensitivity * 0.19;
-    let maxAbs = 0;
-    let maxIdx = -1;
-    for (let i = 1; i < micData.length; i += 1) {
-      const value = Math.abs((micData[i] - 128) / 128) * gainMultiplier;
-      if (value > maxAbs) {
-        maxAbs = value;
-        maxIdx = i;
-      }
+    // Transient detection inspired by standard onset pipelines:
+    // 1) smoothed amplitude envelope
+    // 2) positive first-difference novelty
+    // 3) adaptive thresholding on novelty + amplitude gate
+    // 4) backtrack from novelty peak to attack onset crossing
+    const length = micData.length;
+    const rawAbs = new Array(length);
+    const envelope = new Array(length);
+    const novelty = new Array(length);
+    const smoothing = 0.35;
+    let prevEnv = 0;
+    for (let i = 0; i < length; i += 1) {
+      const absValue = Math.abs((micData[i] - 128) / 128);
+      rawAbs[i] = absValue;
+      const boosted = absValue * gainMultiplier;
+      const env = prevEnv * (1 - smoothing) + boosted * smoothing;
+      envelope[i] = env;
+      novelty[i] = i === 0 ? 0 : Math.max(0, env - prevEnv);
+      prevEnv = env;
     }
-    if (maxIdx < 0 || maxAbs < threshold) {
+
+    const envMedian = median(envelope);
+    const envMad = mad(envelope);
+    const envPeak = Math.max.apply(null, envelope);
+    const amplitudeGate = Math.max(
+      0.04,
+      envMedian + envMad * (1.8 - sensitivity * 0.8)
+    );
+    if (envPeak < amplitudeGate) {
       return null;
     }
 
-    return timing.startMs + (maxIdx / (micData.length - 1)) * timing.spanMs;
+    const noveltyMedian = median(novelty);
+    const noveltyMad = mad(novelty);
+    const noveltyGate = noveltyMedian + noveltyMad * 2.8;
+    let noveltyPeak = 0;
+    let peakIdx = -1;
+    for (let i = 1; i < length; i += 1) {
+      if (envelope[i] < amplitudeGate) {
+        continue;
+      }
+      if (novelty[i] > noveltyPeak) {
+        noveltyPeak = novelty[i];
+        peakIdx = i;
+      }
+    }
+    if (peakIdx < 0 || noveltyPeak < noveltyGate) {
+      return null;
+    }
+
+    const baseline = percentile(envelope, 0.2);
+    const onsetLevel = baseline + Math.max(0.01, (envelope[peakIdx] - baseline) * 0.12);
+    let onsetIdx = peakIdx;
+    for (let i = peakIdx; i >= 1; i -= 1) {
+      if (envelope[i - 1] <= onsetLevel && envelope[i] >= onsetLevel) {
+        onsetIdx = i;
+        break;
+      }
+    }
+
+    // Linear interpolation around crossing for sub-sample onset timing.
+    const prev = envelope[Math.max(0, onsetIdx - 1)];
+    const curr = envelope[onsetIdx];
+    const denom = curr - prev;
+    const frac = denom !== 0 ? clamp((onsetLevel - prev) / denom, 0, 1) : 0;
+    const onsetSample = Math.max(0, onsetIdx - 1) + frac;
+
+    return {
+      hitTimeMs: timing.startMs + (onsetSample / (length - 1)) * timing.spanMs,
+      peakAbsRaw: rawAbs[peakIdx]
+    };
   }
 
-  function addOffsetSample(hitTimeMs, correctedSignedErrorMs) {
+  function addOffsetSample(hitTimeMs, correctedSignedErrorMs, showPoint) {
     const clamped = Math.max(-250, Math.min(250, correctedSignedErrorMs));
     offsetSamples.push({
       timeMs: hitTimeMs,
-      errorMs: clamped
+      errorMs: clamped,
+      showPoint: Boolean(showPoint)
     });
     const rounded = Math.round(clamped);
     liveTempoValue.textContent = rounded > 0 ? "+" + rounded : String(rounded);
@@ -785,7 +1059,7 @@
     return sign * (absCompensated - calibrationJitterMs);
   }
 
-  function updateFeedback(rawErrorMs, hitTimeMs) {
+  function updateFeedback(rawErrorMs, hitTimeMs, peakAbsRaw) {
     const correctedSignedError = getCalibratedSignedError(rawErrorMs);
     const score = getMusicalScore(correctedSignedError);
     const points = score.points;
@@ -796,8 +1070,9 @@
     lastPointsEl.textContent = String(points);
     const isPlottable = Math.abs(correctedSignedError) <= 30;
     if (isPlottable) {
-      addOffsetSample(hitTimeMs, correctedSignedError);
+      registerQualifiedWaveformSpike(peakAbsRaw);
     }
+    addOffsetSample(hitTimeMs, correctedSignedError, isPlottable);
 
     const widthPercent = clamp(points, 0, 100);
     accuracyBar.style.width = widthPercent + "%";
@@ -984,10 +1259,10 @@
 
       if (isRunning || isCalibrationSession) {
         const dynamicCooldownMs = Math.max(85, Math.min(190, beatIntervalMs * 0.35));
-        const hitTimeMs = detectHitFromWaveformChunk(now, sensitivity, gainMultiplier);
-        if (hitTimeMs !== null && hitTimeMs - lastDetectedAt > dynamicCooldownMs) {
-          lastDetectedAt = hitTimeMs;
-          const match = closestBeatMatch(hitTimeMs);
+        const hit = detectHitFromWaveformChunk(now, sensitivity, gainMultiplier);
+        if (hit !== null && hit.hitTimeMs - lastDetectedAt > dynamicCooldownMs) {
+          lastDetectedAt = hit.hitTimeMs;
+          const match = closestBeatMatch(hit.hitTimeMs);
           if (match !== null) {
             if (Math.abs(match.beatTimeMs - lastScoredBeatTimeMs) < 1) {
               analysisRaf = requestAnimationFrame(loop);
@@ -996,10 +1271,14 @@
             lastScoredBeatTimeMs = match.beatTimeMs;
             collectCalibrationSample(match.signedErrorMs);
             if (isRunning) {
-              updateFeedback(match.signedErrorMs, hitTimeMs);
+              updateFeedback(match.signedErrorMs, hit.hitTimeMs, hit.peakAbsRaw);
             } else {
               const correctedSignedError = getCalibratedSignedError(match.signedErrorMs);
-              addOffsetSample(hitTimeMs, correctedSignedError);
+              const isPlottable = Math.abs(correctedSignedError) <= 30;
+              if (isPlottable) {
+                registerQualifiedWaveformSpike(hit.peakAbsRaw);
+              }
+              addOffsetSample(hit.hitTimeMs, correctedSignedError, isPlottable);
             }
           }
         }
@@ -1193,12 +1472,17 @@
 
       isRunning = true;
       resetScore();
+      hoverTimeMs = null;
+      runStartTimeMs = performance.now();
+      runEndTimeMs = 0;
+      historyViewportStartMs = runStartTimeMs;
       beatTimes = [];
       nextBeatTimeSec = audioContext.currentTime + 0.02;
       beatIntervalMs = getBeatIntervalMs();
       lastDetectedAt = 0;
       lastScoredBeatTimeMs = 0;
       resetTempoGraph();
+      resetWaveformGraph();
 
       startButton.disabled = true;
       stopButton.disabled = false;
@@ -1237,12 +1521,13 @@
     }
 
     isRunning = false;
+    runEndTimeMs = performance.now();
+    historyViewportStartMs = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
     stopBeatEngine();
     stopGraphLoop();
-    drawTempoGraph(performance.now());
-
-    // Keep the selected mic preview active so input level remains visible.
-    startInputPreview();
+    cleanupMic();
+    drawWaveformGraph(runEndTimeMs);
+    drawTempoGraph(runEndTimeMs);
 
     startButton.disabled = false;
     stopButton.disabled = true;
@@ -1265,6 +1550,17 @@
   startButton.addEventListener("click", start);
   stopButton.addEventListener("click", stop);
   calibrateButton.addEventListener("click", startCalibration);
+  zoomInButton.addEventListener("click", () => changeHistoryZoom(0.7));
+  zoomOutButton.addEventListener("click", () => changeHistoryZoom(1.4));
+  waveformYZoomInButton.addEventListener("click", () => changeWaveformYZoom(1.25));
+  waveformYZoomOutButton.addEventListener("click", () => changeWaveformYZoom(0.8));
+  waveformAutoZoomButton.addEventListener("click", autoWaveformYZoom);
+  waveformGraph.addEventListener("mousemove", (event) => handleGraphHoverMove(event, waveformGraph));
+  tempoGraph.addEventListener("mousemove", (event) => handleGraphHoverMove(event, tempoGraph));
+  waveformGraph.addEventListener("mouseleave", handleGraphHoverLeave);
+  tempoGraph.addEventListener("mouseleave", handleGraphHoverLeave);
+  waveformGraph.addEventListener("wheel", handleGraphWheel, { passive: false });
+  tempoGraph.addEventListener("wheel", handleGraphWheel, { passive: false });
 
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener("devicechange", () => refreshInputDevices(false));
@@ -1280,6 +1576,8 @@
   resetInputLevelUI();
   resetTempoGraph();
   resetWaveformGraph();
+  updateZoomLabel();
+  updateWaveformYZoomLabel();
   updateSessionStats();
   setCalibrationInfo("Calibration: none");
   setDeviceInfo("Click Detect Inputs to request access and list devices.");
