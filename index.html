@@ -44,7 +44,6 @@
         <div class="row">
           <label for="runDuration">Run Duration</label>
           <select id="runDuration">
-            <option value="0">Indefinite</option>
             <option value="0.5">30 seconds</option>
             <option value="1">1 minute</option>
             <option value="3">3 minutes</option>
@@ -104,18 +103,18 @@
       <section class="score card">
         <p>Total score</p>
         <div class="score-main">
-          <p id="totalScore" class="score-number">0</p>
+          <p id="totalScore" class="score-number">0.0</p>
           <p id="sessionBreakdown" class="small score-breakdown">
-            Accuracy total: <span id="sessionAccuracy">0</span> | Consistency total:
-            <span id="sessionConsistency">0</span><br />
-            Stability total: <span id="sessionStability">0</span> | Pocket total:
-            <span id="sessionPocket">0</span>
+            Accuracy sum: <span id="sessionAccuracy">0.00</span> | Avg note:
+            <span id="sessionConsistency">0.000</span><br />
+            Groove: <span id="sessionStability">50%</span> | Multiplier:
+            <span id="sessionPocket">0.625x</span>
           </p>
         </div>
         <p id="hitCount" class="small">Hits: 0</p>
         <p id="subScores" class="small">
-          Accuracy: <span id="accuracyScore">--</span> | Consistency:
-          <span id="consistencyScore">--</span> | Stability: <span id="stabilityScore">--</span>
+          Accuracy: <span id="accuracyScore">--</span> | Groove:
+          <span id="consistencyScore">--</span> | Multiplier: <span id="stabilityScore">--</span>
         </p>
       </section>
     </main>

@@ -67,6 +67,7 @@
 
   let totalScore = 0;
   let hitCount = 0;
+  let sessionBeatCount = 0;
   let smoothedLevel = 0;
   let lastScoredBeatTimeMs = 0;
   let offsetSamples = [];
@@ -77,6 +78,7 @@
   let sessionSumConsistency = 0;
   let sessionSumStability = 0;
   let sessionSumPocket = 0;
+  let groove = 0.5;
   let runStartTimeMs = 0;
   let runEndTimeMs = 0;
   let historyViewportStartMs = 0;
@@ -137,7 +139,7 @@
   function getRunDurationMs() {
     const durationMinutes = Number(runDurationSelect.value);
     if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
-      return 0;
+      return 60 * 1000;
     }
     return durationMinutes * 60 * 1000;
   }
@@ -170,15 +172,15 @@
       hitsLeftValueEl.textContent = "--";
       return;
     }
-    if (sessionEndTimeMs <= 0) {
-      timeLeftValueEl.textContent = "\u221e";
-      hitsLeftValueEl.textContent = "\u221e";
-      return;
-    }
     const remainingMs = Math.max(0, sessionEndTimeMs - performance.now());
     const hitsLeft = Math.max(0, Math.ceil(remainingMs / beatIntervalMs));
     timeLeftValueEl.textContent = formatMsToClock(remainingMs);
     hitsLeftValueEl.textContent = String(hitsLeft);
+  }
+
+  function updateTotalScoreDisplay() {
+    const normalizedScore = sessionBeatCount > 0 ? (totalScore / sessionBeatCount) * 100 : 0;
+    totalScoreEl.textContent = normalizedScore.toFixed(1);
   }
 
   function updateZoomLabel() {
@@ -442,38 +444,17 @@
     return 0;
   }
 
-  function updateSubScoreUI(accuracy, consistency, stability) {
-    accuracyScoreEl.textContent = String(Math.round(accuracy));
-    consistencyScoreEl.textContent = String(Math.round(consistency));
-    stabilityScoreEl.textContent = String(Math.round(stability));
+  function updateSubScoreUI(accuracy, grooveValue, multiplier) {
+    accuracyScoreEl.textContent = (accuracy * 100).toFixed(1) + "%";
+    consistencyScoreEl.textContent = (grooveValue * 100).toFixed(0) + "%";
+    stabilityScoreEl.textContent = multiplier.toFixed(3) + "x";
   }
 
   function updateSessionBreakdownUI() {
-    sessionAccuracyEl.textContent = String(Math.round(sessionSumAccuracy));
-    sessionConsistencyEl.textContent = String(Math.round(sessionSumConsistency));
-    sessionStabilityEl.textContent = String(Math.round(sessionSumStability));
-    sessionPocketEl.textContent = String(Math.round(sessionSumPocket));
-  }
-
-  function distributeComponentPoints(points, score) {
-    const weightedAccuracy = score.accuracyScore * 0.45;
-    const weightedConsistency = score.consistencyScore * 0.3;
-    const weightedStability = score.stabilityScore * 0.15;
-    const weightedPocket = score.pocketScore * 0.1;
-    const weightedTotal =
-      weightedAccuracy + weightedConsistency + weightedStability + weightedPocket;
-
-    if (points <= 0 || weightedTotal <= 0) {
-      return { accuracy: 0, consistency: 0, stability: 0, pocket: 0 };
-    }
-
-    // Allocate integer component points so component totals always sum exactly to points.
-    const accuracy = Math.floor((weightedAccuracy / weightedTotal) * points);
-    const consistency = Math.floor((weightedConsistency / weightedTotal) * points);
-    const stability = Math.floor((weightedStability / weightedTotal) * points);
-    const pocket = points - accuracy - consistency - stability;
-
-    return { accuracy, consistency, stability, pocket };
+    sessionAccuracyEl.textContent = sessionSumAccuracy.toFixed(2);
+    sessionConsistencyEl.textContent = sessionSumConsistency.toFixed(3);
+    sessionStabilityEl.textContent = (sessionSumStability * 100).toFixed(0) + "%";
+    sessionPocketEl.textContent = sessionSumPocket.toFixed(3) + "x";
   }
 
   function getMusicalScore(correctedSignedError) {
@@ -482,81 +463,46 @@
       recentErrors.shift();
     }
 
-    const targetMs = getPocketTargetMs();
-    const centeredErrors = recentErrors.map((value) => value - targetMs);
-    const currentCenteredError = correctedSignedError - targetMs;
-    const bias = median(recentErrors);
-    const jitter = 1.4826 * mad(centeredErrors);
-    const diffs = [];
-    for (let i = 1; i < centeredErrors.length; i += 1) {
-      diffs.push(centeredErrors[i] - centeredErrors[i - 1]);
-    }
-    const instability = mad(diffs);
+    const absCurrentError = Math.abs(correctedSignedError);
+    const normalized = absCurrentError / LOOSE_MS;
+    const accuracy = clamp(1 - normalized * normalized, 0, 1);
 
-    const absCurrentError = Math.abs(currentCenteredError);
-    let accuracyScore = 0;
     if (absCurrentError < TIGHT_MS) {
-      accuracyScore = 100;
+      groove = clamp(groove + 0.08, 0, 1);
     } else if (absCurrentError < BORDERLINE_MS) {
-      accuracyScore = 70 + ((BORDERLINE_MS - absCurrentError) / (BORDERLINE_MS - TIGHT_MS)) * 30;
+      groove = clamp(groove + 0.02, 0, 1);
     } else if (absCurrentError < LOOSE_MS) {
-      accuracyScore = ((LOOSE_MS - absCurrentError) / (LOOSE_MS - BORDERLINE_MS)) * 70;
+      groove = clamp(groove - 0.05, 0, 1);
+    } else {
+      groove = clamp(groove - 0.12, 0, 1);
     }
-    const consistencyScore = clamp(100 - (jitter / LOOSE_MS) * 100, 0, 100);
-    const stabilityScore = clamp(100 - (instability / LOOSE_MS) * 100, 0, 100);
-    const pocketScore = clamp(100 - (Math.abs(bias - targetMs) / LOOSE_MS) * 100, 0, 100);
 
-    const weightedScore =
-      accuracyScore * 0.45 +
-      consistencyScore * 0.3 +
-      stabilityScore * 0.15 +
-      pocketScore * 0.1;
-    const isScorable = absCurrentError < LOOSE_MS;
+    const multiplier = 0.5 + 0.5 * groove * groove;
+    const noteScore = accuracy * multiplier;
 
     return {
-      points: isScorable ? Math.round(weightedScore) : 0,
-      accuracyScore,
-      consistencyScore,
-      stabilityScore,
-      pocketScore,
-      isScorable
+      points: noteScore,
+      accuracy,
+      groove,
+      multiplier,
+      isScorable: accuracy > 0
     };
   }
 
   function refreshSubScoresFromRecent() {
     if (!recentErrors.length) {
-      updateSubScoreUI(0, 0, 0);
+      const multiplier = 0.5 + 0.5 * groove * groove;
+      updateSubScoreUI(0, groove, multiplier);
+      lastPointsEl.textContent = "0.000";
       return;
     }
-    const targetMs = getPocketTargetMs();
-    const centeredErrors = recentErrors.map((value) => value - targetMs);
-    const currentCenteredError = centeredErrors[centeredErrors.length - 1];
-    const bias = median(recentErrors);
-    const jitter = 1.4826 * mad(centeredErrors);
-    const diffs = [];
-    for (let i = 1; i < centeredErrors.length; i += 1) {
-      diffs.push(centeredErrors[i] - centeredErrors[i - 1]);
-    }
-    const instability = mad(diffs);
-    const absCurrentError = Math.abs(currentCenteredError);
-    let accuracyScore = 0;
-    if (absCurrentError < TIGHT_MS) {
-      accuracyScore = 100;
-    } else if (absCurrentError < BORDERLINE_MS) {
-      accuracyScore = 70 + ((BORDERLINE_MS - absCurrentError) / (BORDERLINE_MS - TIGHT_MS)) * 30;
-    } else if (absCurrentError < LOOSE_MS) {
-      accuracyScore = ((LOOSE_MS - absCurrentError) / (LOOSE_MS - BORDERLINE_MS)) * 70;
-    }
-    const consistencyScore = clamp(100 - (jitter / LOOSE_MS) * 100, 0, 100);
-    const stabilityScore = clamp(100 - (instability / LOOSE_MS) * 100, 0, 100);
-    const pocketScore = clamp(100 - (Math.abs(bias - targetMs) / LOOSE_MS) * 100, 0, 100);
-    const weightedScore =
-      accuracyScore * 0.45 +
-      consistencyScore * 0.3 +
-      stabilityScore * 0.15 +
-      pocketScore * 0.1;
-    lastPointsEl.textContent = String(Math.round(weightedScore));
-    updateSubScoreUI(accuracyScore, consistencyScore, stabilityScore);
+    const lastError = Math.abs(recentErrors[recentErrors.length - 1]);
+    const normalized = lastError / LOOSE_MS;
+    const accuracy = clamp(1 - normalized * normalized, 0, 1);
+    const multiplier = 0.5 + 0.5 * groove * groove;
+    const noteScore = accuracy * multiplier;
+    lastPointsEl.textContent = noteScore.toFixed(3);
+    updateSubScoreUI(accuracy, groove, multiplier);
   }
 
   function valueToY(value, minValue, maxValue, graphHeight) {
@@ -583,7 +529,10 @@
 
     const width = tempoGraph.width;
     const height = tempoGraph.height;
-    const leftPad = 42;
+    const grooveBarLeft = 8;
+    const grooveBarWidth = 6;
+    const grooveToLabelGap = 24;
+    const leftPad = grooveBarLeft + grooveBarWidth + grooveToLabelGap + 28;
     const rightPad = 8;
     const range = getGraphErrorRange(offsetSamples);
     const viewport = getViewportRange(nowMs);
@@ -594,6 +543,23 @@
     ctx.font = "10px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
+
+    const grooveTrackTop = 8;
+    const grooveTrackBottom = height - 8;
+    const grooveTrackHeight = grooveTrackBottom - grooveTrackTop;
+    ctx.fillStyle = "rgba(170, 180, 198, 0.22)";
+    ctx.fillRect(grooveBarLeft, grooveTrackTop, grooveBarWidth, grooveTrackHeight);
+    const grooveFillHeight = grooveTrackHeight * clamp(groove, 0, 1);
+    ctx.fillStyle = "rgba(82, 158, 255, 0.9)";
+    ctx.fillRect(
+      grooveBarLeft,
+      grooveTrackBottom - grooveFillHeight,
+      grooveBarWidth,
+      grooveFillHeight
+    );
+    ctx.strokeStyle = "rgba(196, 205, 220, 0.45)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(grooveBarLeft - 0.5, grooveTrackTop - 0.5, grooveBarWidth + 1, grooveTrackHeight + 1);
 
     function fillBand(minMs, maxMs, color) {
       const top = valueToY(maxMs, range.min, range.max, height);
@@ -1023,17 +989,19 @@
   function resetScore() {
     totalScore = 0;
     hitCount = 0;
+    sessionBeatCount = 0;
     recentErrors = [];
+    groove = 0.5;
     sessionSumAccuracy = 0;
     sessionSumConsistency = 0;
     sessionSumStability = 0;
     sessionSumPocket = 0;
-    totalScoreEl.textContent = "0";
+    totalScoreEl.textContent = "0.0";
     hitCountEl.textContent = "Hits: 0";
     lastErrorEl.textContent = "--";
     lastPointsEl.textContent = "--";
     accuracyBar.style.width = "0%";
-    updateSubScoreUI(0, 0, 0);
+    updateSubScoreUI(0, groove, 0.5 + 0.5 * groove * groove);
     updateSessionBreakdownUI();
   }
 
@@ -1097,6 +1065,10 @@
         const beatPerfTime =
           performance.now() + (nextBeatTimeSec - audioContext.currentTime) * 1000;
         const beatReferenceTime = beatPerfTime + getOutputLatencyMs();
+        if (isRunning && sessionEndTimeMs > 0 && beatReferenceTime <= sessionEndTimeMs) {
+          sessionBeatCount += 1;
+          updateTotalScoreDisplay();
+        }
         playClick(nextBeatTimeSec);
         scheduleVisualFlash(nextBeatTimeSec);
         pushBeatTime(beatReferenceTime);
@@ -1141,34 +1113,28 @@
     const correctedSignedError = getCalibratedSignedError(rawErrorMs);
     const score = getMusicalScore(correctedSignedError);
     const points = score.points;
-    updateSubScoreUI(score.accuracyScore, score.consistencyScore, score.stabilityScore);
+    updateSubScoreUI(score.accuracy, score.groove, score.multiplier);
 
     const roundedError = Math.round(correctedSignedError);
     lastErrorEl.textContent = roundedError > 0 ? "+" + roundedError : String(roundedError);
-    lastPointsEl.textContent = String(points);
+    lastPointsEl.textContent = points.toFixed(3);
     const isPlottable = Math.abs(correctedSignedError) <= 30;
     if (isPlottable) {
       registerQualifiedWaveformSpike(peakAbsRaw);
     }
     addOffsetSample(hitTimeMs, correctedSignedError, isPlottable);
 
-    const widthPercent = clamp(points, 0, 100);
+    const widthPercent = clamp(points * 100, 0, 100);
     accuracyBar.style.width = widthPercent + "%";
-
-    if (!score.isScorable) {
-      return;
-    }
-
-    const componentPoints = distributeComponentPoints(points, score);
-    sessionSumAccuracy += componentPoints.accuracy;
-    sessionSumConsistency += componentPoints.consistency;
-    sessionSumStability += componentPoints.stability;
-    sessionSumPocket += componentPoints.pocket;
-    updateSessionBreakdownUI();
 
     totalScore += points;
     hitCount += 1;
-    totalScoreEl.textContent = String(totalScore);
+    sessionSumAccuracy += score.accuracy;
+    sessionSumConsistency = totalScore / hitCount;
+    sessionSumStability = score.groove;
+    sessionSumPocket = score.multiplier;
+    updateSessionBreakdownUI();
+    updateTotalScoreDisplay();
     hitCountEl.textContent = "Hits: " + hitCount;
   }
 
@@ -1573,20 +1539,18 @@
       stopButton.disabled = false;
       setStatus("Running - tap, clap, or strike to score");
 
+      const runDurationMs = getRunDurationMs();
+      sessionEndTimeMs = performance.now() + runDurationMs;
       scheduleBeatLoop();
       startGraphLoop();
-      const runDurationMs = getRunDurationMs();
-      sessionEndTimeMs = runDurationMs > 0 ? performance.now() + runDurationMs : 0;
       updateSessionStats();
       clearSessionStatsTimer();
       sessionStatsTimer = setInterval(updateSessionStats, 200);
-      if (runDurationMs > 0) {
-        runDurationTimeout = setTimeout(() => {
-          if (isRunning) {
-            stop("finished");
-          }
-        }, runDurationMs);
-      }
+      runDurationTimeout = setTimeout(() => {
+        if (isRunning) {
+          stop("finished");
+        }
+      }, runDurationMs);
     } catch (error) {
       const errorText = formatError(error);
       setStatus("Mic permission/device error: " + errorText, true);
