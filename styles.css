@@ -241,6 +241,35 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.pipeline-badge-row {
+  margin: -2px 0 8px;
+}
+
+.pipeline-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  border: 1px solid #d7dbe3;
+  color: #5b6374;
+  background: #f3f5f9;
+}
+
+.pipeline-badge--worklet {
+  border-color: #b8dfcc;
+  color: #1f7a5a;
+  background: #e8f6ef;
+}
+
+.pipeline-badge--fallback {
+  border-color: #e2d3b4;
+  color: #8e6220;
+  background: #fbf4e6;
+}
+
 #subScores {
   margin-top: 8px;
 }

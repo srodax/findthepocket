@@ -11,6 +11,7 @@
   const refreshDevicesButton = document.getElementById("refreshDevices");
   const deviceInfo = document.getElementById("deviceInfo");
   const diagnosticsEl = document.getElementById("diagnostics");
+  const audioPipelineBadgeEl = document.getElementById("audioPipelineBadge");
   const startButton = document.getElementById("startButton");
   const stopButton = document.getElementById("stopButton");
   const calibrateButton = document.getElementById("calibrateButton");
@@ -61,6 +62,13 @@
   let analyser = null;
   let micData = null;
   let analysisRaf = null;
+  let useWorkletPipeline = false;
+  let workletNode = null;
+  let workletSilenceGain = null;
+  let workletModulePromise = null;
+  let workletFailureReason = "";
+  let audioPerfOffsetMs = 0;
+  let fallbackWaveformLastSampleMs = -Infinity;
   let graphTimer = null;
   let activeDeviceId = "";
   let lastDetectedAt = 0;
@@ -109,6 +117,17 @@
   const BORDERLINE_MS = 10;
   const LOOSE_MS = 20;
 
+  function syncAudioPerfClock() {
+    if (!audioContext) {
+      return;
+    }
+    audioPerfOffsetMs = performance.now() - audioContext.currentTime * 1000;
+  }
+
+  function audioTimeToPerfMs(audioTimeSec) {
+    return audioTimeSec * 1000 + audioPerfOffsetMs;
+  }
+
   function getBeatIntervalMs() {
     const bpm = Number(bpmInput.value);
     return (60 / bpm) * 1000;
@@ -117,12 +136,14 @@
   function updateBpmUI() {
     bpmValue.value = bpmInput.value;
     beatIntervalMs = getBeatIntervalMs();
+    pushWorkletConfig();
     drawTempoGraph(performance.now());
     updateSessionStats();
   }
 
   function updateThresholdUI() {
     thresholdValue.value = Number(thresholdInput.value).toFixed(2);
+    pushWorkletConfig();
   }
 
   function setStatus(message, isError) {
@@ -136,6 +157,27 @@
 
   function setCalibrationInfo(message) {
     calibrationInfo.textContent = message;
+  }
+
+  function updateAudioPipelineBadge(mode) {
+    if (!audioPipelineBadgeEl) {
+      return;
+    }
+    audioPipelineBadgeEl.classList.remove("pipeline-badge--worklet", "pipeline-badge--fallback");
+    if (mode === "worklet") {
+      audioPipelineBadgeEl.textContent = "Worklet";
+      audioPipelineBadgeEl.classList.add("pipeline-badge--worklet");
+      audioPipelineBadgeEl.title = "";
+      return;
+    }
+    if (mode === "fallback") {
+      audioPipelineBadgeEl.textContent = "Fallback";
+      audioPipelineBadgeEl.classList.add("pipeline-badge--fallback");
+      audioPipelineBadgeEl.title = workletFailureReason || "";
+      return;
+    }
+    audioPipelineBadgeEl.textContent = "Detecting...";
+    audioPipelineBadgeEl.title = "";
   }
 
   function getRunDurationMs() {
@@ -736,12 +778,56 @@
     if (!timing) {
       return;
     }
-    const stride = 8;
-    for (let i = 0; i < micData.length; i += stride) {
-      const value = (micData[i] - 128) / 128;
-      const t = timing.startMs + (i / (micData.length - 1)) * timing.spanMs;
-      waveformSamples.push({ timeMs: t, value });
+    const length = micData.length;
+    const sampleStepMs = timing.spanMs / Math.max(1, length - 1);
+    let startIndex = 0;
+    if (Number.isFinite(fallbackWaveformLastSampleMs)) {
+      startIndex = Math.max(
+        0,
+        Math.floor((fallbackWaveformLastSampleMs - timing.startMs) / Math.max(1e-6, sampleStepMs)) + 1
+      );
     }
+    if (startIndex >= length) {
+      return;
+    }
+    const slicedLength = length - startIndex;
+    const values = new Float32Array(slicedLength);
+    for (let i = 0; i < slicedLength; i += 1) {
+      values[i] = (micData[startIndex + i] - 128) / 128;
+    }
+    const adjustedStartMs = timing.startMs + startIndex * sampleStepMs;
+    addWaveformChunk(adjustedStartMs, audioContext.sampleRate || 44100, values);
+  }
+
+  function addWaveformChunk(startTimeMs, sampleRate, values) {
+    if (!values || values.length === 0 || !Number.isFinite(startTimeMs) || !Number.isFinite(sampleRate)) {
+      return;
+    }
+    waveformSamples.push({
+      startTimeMs,
+      sampleRate,
+      values
+    });
+    const chunkEndMs = startTimeMs + ((values.length - 1) * 1000) / sampleRate;
+    fallbackWaveformLastSampleMs = Math.max(fallbackWaveformLastSampleMs, chunkEndMs);
+    if (!isRunning && !isCalibrationSession && !hasRunHistory()) {
+      const previewKeepMs = 20000;
+      const cutoffMs = performance.now() - previewKeepMs;
+      while (waveformSamples.length > 0) {
+        const first = waveformSamples[0];
+        const firstEndMs =
+          first.startTimeMs + ((first.values.length - 1) * 1000) / first.sampleRate;
+        if (firstEndMs >= cutoffMs) {
+          break;
+        }
+        waveformSamples.shift();
+      }
+    }
+  }
+
+  function addWorkletWaveformChunk(startAudioTimeSec, sampleRate, values) {
+    const startTimeMs = audioTimeToPerfMs(startAudioTimeSec);
+    addWaveformChunk(startTimeMs, sampleRate, values);
   }
 
   function drawWaveformGraph(nowMs) {
@@ -790,26 +876,115 @@
     }
 
     if (waveformSamples.length > 0) {
-      const startIdx = lowerBoundByTime(waveformSamples, viewport.startMs);
-      ctx.strokeStyle = "rgba(255, 206, 110, 0.98)";
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      let hasLinePoint = false;
-      for (let i = startIdx; i < waveformSamples.length; i += 1) {
-        const point = waveformSamples[i];
-        if (point.timeMs > viewport.endMs) {
-          break;
+      const ampScale = drawHeight * WAVEFORM_VERTICAL_FRACTION * waveformYZoom;
+      const historyDetailMode = !isRunning && !isCalibrationSession;
+      if (historyDetailMode) {
+        const referenceRate =
+          waveformSamples.length > 0 && Number.isFinite(waveformSamples[0].sampleRate)
+            ? waveformSamples[0].sampleRate
+            : 44100;
+        const approxVisibleSamples = (viewportSpanMs * referenceRate) / 1000;
+        const targetPoints = Math.max(1200, Math.floor(drawWidth * 2.5));
+        const sampleStride = Math.max(1, Math.floor(approxVisibleSamples / targetPoints));
+        ctx.strokeStyle = "rgba(255, 206, 110, 0.98)";
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        let hasLinePoint = false;
+        for (let i = 0; i < waveformSamples.length; i += 1) {
+          const chunk = waveformSamples[i];
+          const values = chunk.values;
+          const sampleRate = chunk.sampleRate;
+          const chunkStart = chunk.startTimeMs;
+          const chunkEnd = chunkStart + ((values.length - 1) * 1000) / sampleRate;
+          if (chunkEnd < viewport.startMs) {
+            continue;
+          }
+          if (chunkStart > viewport.endMs) {
+            break;
+          }
+          const firstSample = Math.max(
+            0,
+            Math.floor(((viewport.startMs - chunkStart) * sampleRate) / 1000)
+          );
+          const lastSample = Math.min(
+            values.length - 1,
+            Math.ceil(((viewport.endMs - chunkStart) * sampleRate) / 1000)
+          );
+          for (let s = firstSample; s <= lastSample; s += sampleStride) {
+            const sampleTimeMs = chunkStart + (s * 1000) / sampleRate;
+            const x = leftPad + ((sampleTimeMs - windowStart) / viewportSpanMs) * drawWidth;
+            const y = centerY - values[s] * ampScale;
+            if (!hasLinePoint) {
+              ctx.moveTo(x, y);
+              hasLinePoint = true;
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
         }
-        const x = leftPad + ((point.timeMs - windowStart) / viewportSpanMs) * drawWidth;
-        const y = centerY - point.value * (drawHeight * WAVEFORM_VERTICAL_FRACTION * waveformYZoom);
-        if (!hasLinePoint) {
-          ctx.moveTo(x, y);
-          hasLinePoint = true;
-        } else {
-          ctx.lineTo(x, y);
+        if (hasLinePoint) {
+          ctx.stroke();
         }
-      }
-      if (hasLinePoint) {
+      } else {
+        const bucketsCount = Math.max(1, Math.floor(drawWidth));
+        const mins = new Float32Array(bucketsCount);
+        const maxs = new Float32Array(bucketsCount);
+        const hasBucket = new Uint8Array(bucketsCount);
+        for (let i = 0; i < bucketsCount; i += 1) {
+          mins[i] = Infinity;
+          maxs[i] = -Infinity;
+        }
+        for (let i = 0; i < waveformSamples.length; i += 1) {
+          const chunk = waveformSamples[i];
+          const values = chunk.values;
+          const sampleRate = chunk.sampleRate;
+          const chunkStart = chunk.startTimeMs;
+          const chunkEnd = chunkStart + ((values.length - 1) * 1000) / sampleRate;
+          if (chunkEnd < viewport.startMs) {
+            continue;
+          }
+          if (chunkStart > viewport.endMs) {
+            break;
+          }
+          const firstSample = Math.max(
+            0,
+            Math.floor(((viewport.startMs - chunkStart) * sampleRate) / 1000)
+          );
+          const lastSample = Math.min(
+            values.length - 1,
+            Math.ceil(((viewport.endMs - chunkStart) * sampleRate) / 1000)
+          );
+          for (let s = firstSample; s <= lastSample; s += 1) {
+            const sampleTimeMs = chunkStart + (s * 1000) / sampleRate;
+            const normalizedX = (sampleTimeMs - windowStart) / viewportSpanMs;
+            const bucket = clamp(
+              Math.floor(normalizedX * (bucketsCount - 1)),
+              0,
+              bucketsCount - 1
+            );
+            const value = values[s];
+            if (value < mins[bucket]) {
+              mins[bucket] = value;
+            }
+            if (value > maxs[bucket]) {
+              maxs[bucket] = value;
+            }
+            hasBucket[bucket] = 1;
+          }
+        }
+        ctx.strokeStyle = "rgba(255, 206, 110, 0.98)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = 0; i < bucketsCount; i += 1) {
+          if (!hasBucket[i]) {
+            continue;
+          }
+          const x = leftPad + ((bucketsCount <= 1 ? 0 : i / (bucketsCount - 1)) * drawWidth);
+          const yMin = centerY - mins[i] * ampScale;
+          const yMax = centerY - maxs[i] * ampScale;
+          ctx.moveTo(x, yMin);
+          ctx.lineTo(x, yMax);
+        }
         ctx.stroke();
       }
     }
@@ -829,6 +1004,7 @@
     waveformSamples = [];
     clickMarkers = [];
     waveformQualifiedPeakAbsMax = 0;
+    fallbackWaveformLastSampleMs = -Infinity;
     drawWaveformGraph(performance.now());
   }
 
@@ -967,6 +1143,10 @@
     if (extra) {
       lines.push(extra);
     }
+    lines.push("audioPipeline=" + (useWorkletPipeline ? "worklet" : "fallback"));
+    if (!useWorkletPipeline && workletFailureReason) {
+      lines.push("workletReason=" + workletFailureReason);
+    }
     diagnosticsEl.textContent = "Context: " + lines.join(" | ");
   }
 
@@ -1022,6 +1202,7 @@
     if (audioContext.state === "suspended") {
       await audioContext.resume();
     }
+    syncAudioPerfClock();
   }
 
   function playClick(timeSec) {
@@ -1122,6 +1303,7 @@
 
   function scheduleBeatLoop() {
     beatTimer = setInterval(() => {
+      syncAudioPerfClock();
       while (nextBeatTimeSec < audioContext.currentTime + SCHEDULE_AHEAD_SEC) {
         const beatPerfTime =
           performance.now() + (nextBeatTimeSec - audioContext.currentTime) * 1000;
@@ -1238,6 +1420,7 @@
 
       isCalibrationSession = true;
       isCalibrating = true;
+      pushWorkletConfig();
       calibrationSamples = [];
       beatTimes = [];
       nextBeatTimeSec = sessionStartBeatSec;
@@ -1270,6 +1453,7 @@
   function stopCalibrationSession(completed) {
     isCalibrationSession = false;
     isCalibrating = false;
+    pushWorkletConfig();
     stopBeatEngine();
     stopGraphLoop();
     drawTempoGraph(performance.now());
@@ -1340,8 +1524,98 @@
     }
   }
 
+  function handleDetectedHit(hitTimeMs, peakAbsRaw) {
+    const match = closestBeatMatch(hitTimeMs);
+    if (match === null) {
+      return;
+    }
+    if (Math.abs(match.beatTimeMs - lastScoredBeatTimeMs) < 1) {
+      return;
+    }
+    lastScoredBeatTimeMs = match.beatTimeMs;
+    collectCalibrationSample(match.signedErrorMs);
+    if (isRunning) {
+      updateFeedback(match.signedErrorMs, hitTimeMs, peakAbsRaw);
+    } else {
+      const correctedSignedError = getCalibratedSignedError(match.signedErrorMs);
+      const isPlottable = Math.abs(correctedSignedError) <= 30;
+      if (isPlottable) {
+        registerQualifiedWaveformSpike(peakAbsRaw);
+      }
+      addOffsetSample(hitTimeMs, correctedSignedError, isPlottable);
+    }
+  }
+
+  function pushWorkletConfig() {
+    if (!useWorkletPipeline || !workletNode) {
+      return;
+    }
+    const sensitivity = Number(thresholdInput.value);
+    const gainMultiplier = 1 + sensitivity * 4;
+    workletNode.port.postMessage({
+      type: "config",
+      sensitivity,
+      gainMultiplier,
+      beatIntervalMs,
+      detectEnabled: isRunning || isCalibrationSession
+    });
+  }
+
+  async function ensureWorkletProcessorLoaded() {
+    if (!audioContext || !audioContext.audioWorklet) {
+      workletFailureReason = "AudioWorklet API unavailable in this browser/context";
+      return false;
+    }
+    if (!workletModulePromise) {
+      const moduleUrl = new URL("worklets/onset-processor.js", window.location.href).toString();
+      workletModulePromise = audioContext.audioWorklet.addModule(moduleUrl);
+    }
+    try {
+      await workletModulePromise;
+      workletFailureReason = "";
+      return true;
+    } catch (error) {
+      workletModulePromise = null;
+      workletFailureReason = "Worklet module load failed: " + formatError(error);
+      return false;
+    }
+  }
+
+  function handleWorkletMessage(event) {
+    const data = event.data || {};
+    if (data.type === "waveChunk" && data.values && Number.isFinite(data.startAudioTimeSec)) {
+      const values = data.values instanceof Float32Array ? data.values : new Float32Array(data.values);
+      addWorkletWaveformChunk(data.startAudioTimeSec, data.sampleRate || 44100, values);
+      drawWaveformGraph(performance.now());
+      return;
+    }
+    if (data.type === "level" && Number.isFinite(data.rms)) {
+      const sensitivity = Number(thresholdInput.value);
+      const gainMultiplier = 1 + sensitivity * 4;
+      smoothedLevel = smoothedLevel * 0.78 + data.rms * 0.22;
+      const boostedLevel = smoothedLevel * gainMultiplier;
+      const levelPercent = Math.max(0, Math.min(100, Math.round(boostedLevel * 300)));
+      inputLevelBar.style.width = levelPercent + "%";
+      inputLevelValue.textContent = levelPercent + "%";
+      return;
+    }
+    if (data.type === "onset" && Number.isFinite(data.audioTimeSec)) {
+      if (!(isRunning || isCalibrationSession)) {
+        return;
+      }
+      const peakAbsRaw = Number.isFinite(data.peakAbsRaw) ? data.peakAbsRaw : 0;
+      const hitTimeMs = audioTimeToPerfMs(data.audioTimeSec);
+      const dynamicCooldownMs = Math.max(85, Math.min(190, beatIntervalMs * 0.35));
+      if (hitTimeMs - lastDetectedAt <= dynamicCooldownMs) {
+        return;
+      }
+      lastDetectedAt = hitTimeMs;
+      handleDetectedHit(hitTimeMs, peakAbsRaw);
+    }
+  }
+
   function startAudioAnalysisLoop() {
-    if (analysisRaf) {
+    if (analysisRaf || (useWorkletPipeline && workletNode)) {
       return;
     }
 
@@ -1375,25 +1649,7 @@
         const hit = detectHitFromWaveformChunk(now, sensitivity, gainMultiplier);
         if (hit !== null && hit.hitTimeMs - lastDetectedAt > dynamicCooldownMs) {
           lastDetectedAt = hit.hitTimeMs;
-          const match = closestBeatMatch(hit.hitTimeMs);
-          if (match !== null) {
-            if (Math.abs(match.beatTimeMs - lastScoredBeatTimeMs) < 1) {
-              analysisRaf = requestAnimationFrame(loop);
-              return;
-            }
-            lastScoredBeatTimeMs = match.beatTimeMs;
-            collectCalibrationSample(match.signedErrorMs);
-            if (isRunning) {
-              updateFeedback(match.signedErrorMs, hit.hitTimeMs, hit.peakAbsRaw);
-            } else {
-              const correctedSignedError = getCalibratedSignedError(match.signedErrorMs);
-              const isPlottable = Math.abs(correctedSignedError) <= 30;
-              if (isPlottable) {
-                registerQualifiedWaveformSpike(hit.peakAbsRaw);
-              }
-              addOffsetSample(hit.hitTimeMs, correctedSignedError, isPlottable);
-            }
-          }
+          handleDetectedHit(hit.hitTimeMs, hit.peakAbsRaw);
         }
       }
 
@@ -1404,6 +1660,9 @@
   }
 
   function stopAudioAnalysisLoop() {
+    if (useWorkletPipeline && workletNode) {
+      pushWorkletConfig();
+    }
     if (analysisRaf) {
       cancelAnimationFrame(analysisRaf);
       analysisRaf = null;
@@ -1413,7 +1672,7 @@
   async function setupMicInput() {
     const selectedDeviceId = inputDeviceSelect.value;
     const normalizedDeviceId = selectedDeviceId || "default";
-    if (mediaStream && analyser && activeDeviceId === normalizedDeviceId) {
+    if (mediaStream && (analyser || workletNode) && activeDeviceId === normalizedDeviceId) {
       return;
     }
     cleanupMic();
@@ -1448,12 +1707,50 @@
     }
 
     micSource = audioContext.createMediaStreamSource(mediaStream);
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0;
-    micData = new Uint8Array(analyser.fftSize);
-    micSource.connect(analyser);
+    syncAudioPerfClock();
+    const canUseWorklet = await ensureWorkletProcessorLoaded();
+    useWorkletPipeline = false;
+    if (canUseWorklet) {
+      try {
+        workletNode = new AudioWorkletNode(audioContext, "pocket-onset-processor", {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          channelCount: 1,
+          channelCountMode: "explicit"
+        });
+        workletNode.port.onmessage = handleWorkletMessage;
+        workletSilenceGain = audioContext.createGain();
+        workletSilenceGain.gain.value = 0;
+        micSource.connect(workletNode);
+        workletNode.connect(workletSilenceGain);
+        workletSilenceGain.connect(audioContext.destination);
+        useWorkletPipeline = true;
+        analyser = null;
+        micData = null;
+        updateAudioPipelineBadge("worklet");
+        setStatus("Input preview active (audio-thread processing)");
+      } catch (error) {
+        workletFailureReason = "Worklet node init failed: " + formatError(error);
+        workletNode = null;
+        if (workletSilenceGain) {
+          workletSilenceGain.disconnect();
+          workletSilenceGain = null;
+        }
+        useWorkletPipeline = false;
+      }
+    }
+    if (!useWorkletPipeline) {
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0;
+      micData = new Uint8Array(analyser.fftSize);
+      micSource.connect(analyser);
+      updateAudioPipelineBadge("fallback");
+      setStatus("Input preview active (fallback analyser mode)");
+    }
     activeDeviceId = normalizedDeviceId;
+    pushWorkletConfig();
     startAudioAnalysisLoop();
   }
 
@@ -1474,10 +1771,21 @@
 
   function cleanupMic() {
     stopAudioAnalysisLoop();
+    if (workletNode) {
+      workletNode.port.onmessage = null;
+      workletNode.disconnect();
+      workletNode = null;
+    }
+    if (workletSilenceGain) {
+      workletSilenceGain.disconnect();
+      workletSilenceGain = null;
+    }
     if (micSource) {
       micSource.disconnect();
       micSource = null;
     }
+    useWorkletPipeline = false;
+    updateAudioPipelineBadge("detecting");
     analyser = null;
     micData = null;
     if (mediaStream) {
@@ -1585,6 +1893,7 @@
       const sessionStartBeatSec = await runCountIn();
 
       isRunning = true;
+      pushWorkletConfig();
       resetScore();
       hoverTimeMs = null;
       runStartTimeMs = performance.now();
@@ -1641,6 +1950,7 @@
     }
 
     isRunning = false;
+    pushWorkletConfig();
     runEndTimeMs = performance.now();
     historyViewportStartMs = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
     historyScrollTargetStartMs = historyViewportStartMs;
@@ -1696,6 +2006,7 @@
 
   updateBpmUI();
   updateThresholdUI();
+  updateAudioPipelineBadge("detecting");
   resetScore();
   resetInputLevelUI();
   resetTempoGraph();
