@@ -80,6 +80,10 @@
   let runStartTimeMs = 0;
   let runEndTimeMs = 0;
   let historyViewportStartMs = 0;
+  let historyScrollTargetStartMs = 0;
+  let historyScrollVelocityMs = 0;
+  let historyScrollRaf = null;
+  let lastWheelDirection = 0;
   let hoverTimeMs = null;
   let historyViewWindowMs = 15000;
   let waveformYZoom = 1;
@@ -236,6 +240,8 @@
       const half = historyViewWindowMs / 2;
       const maxStart = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
       historyViewportStartMs = clamp(previousCenter - half, runStartTimeMs, maxStart);
+      historyScrollTargetStartMs = historyViewportStartMs;
+      historyScrollVelocityMs = 0;
     }
 
     drawWaveformGraph(nowMs);
@@ -299,13 +305,85 @@
       return;
     }
     event.preventDefault();
-    const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
-    const shiftMs = delta * 12;
+    const dominantAxisDelta =
+      Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    let deltaPixels = dominantAxisDelta;
+    if (event.deltaMode === 1) {
+      deltaPixels *= 16;
+    } else if (event.deltaMode === 2) {
+      deltaPixels *= 800;
+    }
+    if (Math.abs(deltaPixels) < 0.25) {
+      return;
+    }
+    const wheelDirection = deltaPixels > 0 ? 1 : -1;
+    if (lastWheelDirection !== 0 && wheelDirection !== lastWheelDirection && Math.abs(deltaPixels) < 1.5) {
+      return;
+    }
+    lastWheelDirection = wheelDirection;
+
+    const msPerPixel = historyViewWindowMs / 900;
+    const shiftMs = deltaPixels * msPerPixel;
     const maxStart = runEndTimeMs - historyViewWindowMs;
-    historyViewportStartMs = clamp(historyViewportStartMs + shiftMs, runStartTimeMs, maxStart);
-    const nowMs = performance.now();
-    drawWaveformGraph(nowMs);
-    drawTempoGraph(nowMs);
+    if (!Number.isFinite(historyScrollTargetStartMs) || historyScrollTargetStartMs === 0) {
+      historyScrollTargetStartMs = historyViewportStartMs;
+    }
+    historyScrollTargetStartMs = clamp(
+      historyScrollTargetStartMs + shiftMs,
+      runStartTimeMs,
+      maxStart
+    );
+    if (historyScrollVelocityMs !== 0 && Math.sign(shiftMs) !== Math.sign(historyScrollVelocityMs)) {
+      historyScrollVelocityMs *= 0.35;
+    }
+    historyScrollVelocityMs += shiftMs * 0.12;
+    startHistoryScrollAnimation();
+  }
+
+  function startHistoryScrollAnimation() {
+    if (historyScrollRaf) {
+      return;
+    }
+    function frame() {
+      historyScrollRaf = null;
+      if (!hasRunHistory() || isRunning || isCalibrationSession) {
+        historyScrollVelocityMs = 0;
+        return;
+      }
+      const maxStart = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
+      historyScrollTargetStartMs = clamp(historyScrollTargetStartMs, runStartTimeMs, maxStart);
+
+      const distance = historyScrollTargetStartMs - historyViewportStartMs;
+      historyScrollVelocityMs += distance * 0.2;
+      historyScrollVelocityMs *= 0.7;
+      const proposedStart = clamp(
+        historyViewportStartMs + historyScrollVelocityMs,
+        runStartTimeMs,
+        maxStart
+      );
+      const remainingAfterStep = historyScrollTargetStartMs - proposedStart;
+      if (distance !== 0 && Math.sign(distance) !== Math.sign(remainingAfterStep)) {
+        historyViewportStartMs = historyScrollTargetStartMs;
+        historyScrollVelocityMs = 0;
+      } else {
+        historyViewportStartMs = proposedStart;
+      }
+
+      const nowMs = performance.now();
+      drawWaveformGraph(nowMs);
+      drawTempoGraph(nowMs);
+
+      const remaining = historyScrollTargetStartMs - historyViewportStartMs;
+      if (Math.abs(remaining) > 0.15 || Math.abs(historyScrollVelocityMs) > 0.15) {
+        historyScrollRaf = requestAnimationFrame(frame);
+      } else {
+        historyViewportStartMs = historyScrollTargetStartMs;
+        historyScrollVelocityMs = 0;
+        drawWaveformGraph(nowMs);
+        drawTempoGraph(nowMs);
+      }
+    }
+    historyScrollRaf = requestAnimationFrame(frame);
   }
 
   function clamp(value, min, max) {
@@ -1108,6 +1186,10 @@
     clearRunDurationTimeout();
     clearSessionStatsTimer();
     sessionEndTimeMs = 0;
+    if (historyScrollRaf) {
+      cancelAnimationFrame(historyScrollRaf);
+      historyScrollRaf = null;
+    }
     if (beatTimer) {
       clearInterval(beatTimer);
       beatTimer = null;
@@ -1476,6 +1558,9 @@
       runStartTimeMs = performance.now();
       runEndTimeMs = 0;
       historyViewportStartMs = runStartTimeMs;
+      historyScrollTargetStartMs = historyViewportStartMs;
+      historyScrollVelocityMs = 0;
+      lastWheelDirection = 0;
       beatTimes = [];
       nextBeatTimeSec = audioContext.currentTime + 0.02;
       beatIntervalMs = getBeatIntervalMs();
@@ -1523,6 +1608,9 @@
     isRunning = false;
     runEndTimeMs = performance.now();
     historyViewportStartMs = Math.max(runStartTimeMs, runEndTimeMs - historyViewWindowMs);
+    historyScrollTargetStartMs = historyViewportStartMs;
+    historyScrollVelocityMs = 0;
+    lastWheelDirection = 0;
     stopBeatEngine();
     stopGraphLoop();
     cleanupMic();
