@@ -1,0 +1,10 @@
+# CMake/JUCE build outputs
+/build/
+/cmake-build*/
+
+# JUCE generated artifacts (if building in-source)
+/plugin/FindThePocket_artefacts/
+/plugin/JuceLibraryCode/
+
+# macOS
+.DS_Store
