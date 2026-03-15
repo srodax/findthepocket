@@ -25,6 +25,8 @@ public:
     void zoomY(double factor);
     void resetYRange();
     bool autoYRange();
+    bool getMedianErrorMs(double& outMedianMs) const;
+    void shiftAllErrors(float deltaMs);
     double yHalfRangeMs() const noexcept { return yHalfRangeMs_; }
     void paint(juce::Graphics& g) override;
     void mouseMove(const juce::MouseEvent& event) override;
@@ -104,4 +106,5 @@ private:
     std::unique_ptr<ComboAttachment> pocketAttachment_;
     std::unique_ptr<ComboAttachment> durationAttachment_;
     bool wasRunning_ = false;
+    int lastRunEpoch_ = -1;
 };

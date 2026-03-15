@@ -41,6 +41,7 @@ public:
         bool isCalibrating = false;
         bool isRecording = false;
         double projectTimeSec = 0.0;
+        int runEpoch = 0;
         int calibrationSamples = 0;
         float calibrationOffsetMs = 0.0f;
         float calibrationJitterMs = 5.0f;
@@ -72,9 +73,10 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    void startRun();
+    void startRun(double nowSec);
     void startCalibration();
     void stopSession();
+    void nudgeCalibrationOffsetMs(double deltaMs) noexcept;
     UiSnapshot getUiSnapshot() const noexcept;
     int drainRecentHits(HitTelemetry* dst, int maxItems) noexcept;
 
@@ -87,6 +89,9 @@ private:
 
     void pushHitTelemetry(const HitTelemetry& hit) noexcept;
     void updateRemainingFromSession(double nowSec);
+    void saveGlobalCalibration() const;
+    void loadGlobalCalibration();
+    static juce::File globalCalibrationFile();
 
     juce::AudioProcessorValueTreeState parameters_;
 
@@ -119,7 +124,11 @@ private:
     std::atomic<bool> calibrating_{ false };
     std::atomic<bool> recording_{ false };
     std::atomic<double> projectTimeSec_{ 0.0 };
+    std::atomic<double> pendingCalibrationNudgeMs_{ 0.0 };
+    std::atomic<int> runEpoch_{ 0 };
+    bool previousRecording_ = false;
     bool canAutoStartOnRecord_ = true;
+    std::int64_t lastHostTimeInSamples_ = -1;
     std::int64_t fallbackSamplePosition_ = 0;
 };
 

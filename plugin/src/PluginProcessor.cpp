@@ -11,6 +11,7 @@ FindThePocketAudioProcessor::FindThePocketAudioProcessor()
       parameters_(*this, nullptr, "PARAMS", createParameterLayout()),
       calibration_(24)
 {
+    loadGlobalCalibration();
 }
 
 void FindThePocketAudioProcessor::prepareToPlay(double sampleRate, int)
@@ -46,6 +47,15 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const auto pocketModeChoice = pocketModeParam != nullptr ? static_cast<int>(std::lround(pocketModeParam->load())) : 0;
     const auto runChoice = runDurationParam != nullptr ? static_cast<int>(std::lround(runDurationParam->load())) : 1;
 
+    if (const auto pendingNudge = pendingCalibrationNudgeMs_.exchange(0.0); std::abs(pendingNudge) > 0.0001)
+    {
+        const auto nextOffset = static_cast<double>(calibrationOffsetMs_.load()) + pendingNudge;
+        const auto jitter = static_cast<double>(calibrationJitterMs_.load());
+        scoring_.setCalibration(nextOffset, jitter);
+        calibrationOffsetMs_.store(static_cast<float>(nextOffset));
+        saveGlobalCalibration();
+    }
+
     scoring_.setPocketMode(pocketModeFromChoice(pocketModeChoice));
     session_.setRunDurationSeconds(runDurationFromChoice(runChoice));
 
@@ -59,9 +69,10 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     {
         if (timing.valid && timing.isRecording)
         {
-            if (canAutoStartOnRecord_ && !running_.load())
+            const auto recordingRisingEdge = !previousRecording_;
+            if ((canAutoStartOnRecord_ || recordingRisingEdge) && !running_.load())
             {
-                startRun();
+                startRun(timing.projectTimeStartSec);
                 canAutoStartOnRecord_ = false;
             }
         }
@@ -72,6 +83,7 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             canAutoStartOnRecord_ = true;
         }
     }
+    previousRecording_ = timing.valid && timing.isRecording;
 
     const auto bpm = timing.valid ? timing.bpm : 120.0;
     const auto beatIntervalMs = 60000.0 / std::max(1.0, bpm);
@@ -101,6 +113,12 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     }
 
     const auto blockStartSample = timing.valid ? timing.timeInSamples : fallbackSamplePosition_;
+    if (lastHostTimeInSamples_ >= 0 && blockStartSample < lastHostTimeInSamples_)
+    {
+        // Transport seek/rewind: reset absolute-sample-based onset cooldown state.
+        onsetDetector_.reset();
+    }
+    lastHostTimeInSamples_ = blockStartSample;
     fallbackSamplePosition_ = blockStartSample + buffer.getNumSamples();
 
     std::array<ftp::dsp::OnsetEvent, 64> onsetEvents {};
@@ -250,9 +268,10 @@ void FindThePocketAudioProcessor::setStateInformation(const void* data, int size
     scoring_.setCalibration(offset, jitter);
     calibrationOffsetMs_.store(static_cast<float>(offset));
     calibrationJitterMs_.store(static_cast<float>(jitter));
+    saveGlobalCalibration();
 }
 
-void FindThePocketAudioProcessor::startRun()
+void FindThePocketAudioProcessor::startRun(double nowSec)
 {
     if (running_.load())
         return;
@@ -260,11 +279,14 @@ void FindThePocketAudioProcessor::startRun()
     calibrationSamples_.store(0);
     running_.store(true);
     calibrating_.store(false);
-    session_.startRun(static_cast<double>(fallbackSamplePosition_) / std::max(1.0, getSampleRate()));
+    onsetDetector_.reset();
+    session_.startRun(nowSec);
+    runEpoch_.fetch_add(1);
 }
 
 void FindThePocketAudioProcessor::startCalibration()
 {
+    // Legacy calibration mode kept for compatibility; UI now uses offset nudge calibration.
     calibration_.reset();
     calibrationSamples_.store(0);
     running_.store(false);
@@ -279,6 +301,17 @@ void FindThePocketAudioProcessor::stopSession()
     session_.stop();
     running_.store(false);
     calibrating_.store(false);
+    onsetDetector_.reset();
+}
+
+void FindThePocketAudioProcessor::nudgeCalibrationOffsetMs(double deltaMs) noexcept
+{
+    if (!std::isfinite(deltaMs))
+        return;
+    auto current = pendingCalibrationNudgeMs_.load();
+    while (!pendingCalibrationNudgeMs_.compare_exchange_weak(current, current + deltaMs))
+    {
+    }
 }
 
 FindThePocketAudioProcessor::UiSnapshot FindThePocketAudioProcessor::getUiSnapshot() const noexcept
@@ -300,6 +333,7 @@ FindThePocketAudioProcessor::UiSnapshot FindThePocketAudioProcessor::getUiSnapsh
     out.isCalibrating = calibrating_.load();
     out.isRecording = recording_.load();
     out.projectTimeSec = projectTimeSec_.load();
+    out.runEpoch = runEpoch_.load();
     out.calibrationSamples = calibrationSamples_.load();
     out.calibrationOffsetMs = calibrationOffsetMs_.load();
     out.calibrationJitterMs = calibrationJitterMs_.load();
@@ -379,6 +413,41 @@ void FindThePocketAudioProcessor::updateRemainingFromSession(double nowSec)
     const auto remaining = session_.remaining(nowSec);
     timeLeftSec_.store(static_cast<int>(std::round(remaining.timeLeftSec)));
     hitsLeft_.store(static_cast<int>(remaining.hitsLeft));
+}
+
+juce::File FindThePocketAudioProcessor::globalCalibrationFile()
+{
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                   .getChildFile("FindThePocket");
+    if (!dir.exists())
+        dir.createDirectory();
+    return dir.getChildFile("calibration.txt");
+}
+
+void FindThePocketAudioProcessor::saveGlobalCalibration() const
+{
+    const auto file = globalCalibrationFile();
+    const juce::String text = juce::String(static_cast<double>(calibrationOffsetMs_.load()), 6) + "\n"
+                            + juce::String(static_cast<double>(calibrationJitterMs_.load()), 6) + "\n";
+    file.replaceWithText(text);
+}
+
+void FindThePocketAudioProcessor::loadGlobalCalibration()
+{
+    const auto file = globalCalibrationFile();
+    if (!file.existsAsFile())
+        return;
+
+    const auto content = file.loadFileAsString();
+    const auto lines = juce::StringArray::fromLines(content);
+    if (lines.isEmpty())
+        return;
+
+    const auto offset = lines[0].trim().getDoubleValue();
+    const auto jitter = lines.size() > 1 ? lines[1].trim().getDoubleValue() : 5.0;
+    scoring_.setCalibration(offset, jitter);
+    calibrationOffsetMs_.store(static_cast<float>(offset));
+    calibrationJitterMs_.store(static_cast<float>(jitter));
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

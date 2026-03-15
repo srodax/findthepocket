@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <vector>
@@ -97,6 +98,37 @@ bool OffsetGraphComponent::autoYRange()
     clampYRange();
     repaint();
     return true;
+}
+
+bool OffsetGraphComponent::getMedianErrorMs(double& outMedianMs) const
+{
+    if (samples_.empty())
+        return false;
+
+    std::vector<float> values;
+    values.reserve(samples_.size());
+    for (const auto& sample : samples_)
+        values.push_back(sample.errorMs);
+
+    const auto mid = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(mid), values.end());
+    auto medianValue = static_cast<double>(values[mid]);
+    if ((values.size() % 2) == 0 && mid > 0)
+    {
+        std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(mid - 1), values.end());
+        medianValue = (medianValue + static_cast<double>(values[mid - 1])) * 0.5;
+    }
+    outMedianMs = medianValue;
+    return std::isfinite(outMedianMs);
+}
+
+void OffsetGraphComponent::shiftAllErrors(float deltaMs)
+{
+    if (!std::isfinite(deltaMs) || std::abs(deltaMs) < 0.0001f)
+        return;
+    for (auto& sample : samples_)
+        sample.errorMs += deltaMs;
+    repaint();
 }
 
 void OffsetGraphComponent::paint(juce::Graphics& g)
@@ -451,7 +483,17 @@ FindThePocketAudioProcessorEditor::FindThePocketAudioProcessorEditor(FindThePock
     addAndMakeVisible(yResetButton_);
     addAndMakeVisible(yAutoButton_);
 
-    calibrateButton_.onClick = [this] { processor_.startCalibration(); };
+    calibrateButton_.onClick = [this]
+    {
+        double medianMs = 0.0;
+        if (!offsetGraph_.getMedianErrorMs(medianMs))
+            return;
+
+        // Nudge processor calibration offset so future points center around zero.
+        processor_.nudgeCalibrationOffsetMs(medianMs);
+        // Shift currently displayed history for immediate visual feedback.
+        offsetGraph_.shiftAllErrors(static_cast<float>(-medianMs));
+    };
     yZoomOutButton_.onClick = [this]
     {
         offsetGraph_.zoomY(1.25);
@@ -559,8 +601,15 @@ void FindThePocketAudioProcessorEditor::timerCallback()
     }
 
     const auto snapshot = processor_.getUiSnapshot();
-    if (snapshot.isRunning && !wasRunning_)
+    if (snapshot.runEpoch != lastRunEpoch_)
+    {
         offsetGraph_.clear();
+        lastRunEpoch_ = snapshot.runEpoch;
+    }
+    else if (snapshot.isRunning && !wasRunning_)
+    {
+        offsetGraph_.clear();
+    }
     wasRunning_ = snapshot.isRunning;
     offsetGraph_.setRunning(snapshot.isRunning);
     offsetGraph_.setCurrentProjectTime(snapshot.projectTimeSec);
