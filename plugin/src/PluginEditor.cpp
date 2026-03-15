@@ -12,6 +12,9 @@ void OffsetGraphComponent::pushSample(const Sample& sample)
     if (running_)
     {
         viewportStartSec_ = std::max(0.0, currentProjectTimeSec_ - viewportWindowSec_);
+        targetViewportStartSec_ = viewportStartSec_;
+        targetViewportWindowSec_ = viewportWindowSec_;
+        scrollVelocitySec_ = 0.0;
         viewportInitialized_ = true;
     }
     repaint();
@@ -23,6 +26,12 @@ void OffsetGraphComponent::clear()
     hoverProjectTimeSec_.reset();
     viewportInitialized_ = false;
     viewportStartSec_ = 0.0;
+    targetViewportStartSec_ = 0.0;
+    viewportWindowSec_ = 15.0;
+    targetViewportWindowSec_ = viewportWindowSec_;
+    scrollVelocitySec_ = 0.0;
+    isAnimatingViewport_ = false;
+    stopTimer();
     repaint();
 }
 
@@ -32,6 +41,11 @@ void OffsetGraphComponent::setRunning(bool running)
     if (running_)
     {
         viewportStartSec_ = std::max(0.0, currentProjectTimeSec_ - viewportWindowSec_);
+        targetViewportStartSec_ = viewportStartSec_;
+        targetViewportWindowSec_ = viewportWindowSec_;
+        scrollVelocitySec_ = 0.0;
+        isAnimatingViewport_ = false;
+        stopTimer();
         viewportInitialized_ = true;
     }
 }
@@ -42,17 +56,55 @@ void OffsetGraphComponent::setCurrentProjectTime(double projectTimeSec)
     if (running_)
     {
         viewportStartSec_ = std::max(0.0, currentProjectTimeSec_ - viewportWindowSec_);
+        targetViewportStartSec_ = viewportStartSec_;
         viewportInitialized_ = true;
         repaint();
     }
+}
+
+void OffsetGraphComponent::zoomY(double factor)
+{
+    if (!std::isfinite(factor) || factor <= 0.0)
+        return;
+    yHalfRangeMs_ *= factor;
+    clampYRange();
+    repaint();
+}
+
+void OffsetGraphComponent::resetYRange()
+{
+    yHalfRangeMs_ = defaultYHalfRangeMs_;
+    clampYRange();
+    repaint();
+}
+
+bool OffsetGraphComponent::autoYRange()
+{
+    if (samples_.empty())
+        return false;
+
+    double maxAbs = 0.0;
+    for (const auto& sample : samples_)
+        maxAbs = std::max(maxAbs, std::abs(static_cast<double>(sample.errorMs)));
+
+    if (maxAbs < 0.5)
+        yHalfRangeMs_ = defaultYHalfRangeMs_;
+    else
+    {
+        const auto padded = maxAbs * 1.2;
+        yHalfRangeMs_ = std::ceil(padded / 10.0) * 10.0;
+    }
+    clampYRange();
+    repaint();
+    return true;
 }
 
 void OffsetGraphComponent::paint(juce::Graphics& g)
 {
     const auto bounds = getLocalBounds().toFloat();
     const auto area = bounds.reduced(8.0f);
-    constexpr float graphMinMs = -35.0f;
-    constexpr float graphMaxMs = 35.0f;
+    const float graphMinMs = static_cast<float>(-yHalfRangeMs_);
+    const float graphMaxMs = static_cast<float>(yHalfRangeMs_);
     constexpr int leftLabelPad = 62;
     constexpr float tightMs = 5.0f;
     constexpr float borderlineMs = 10.0f;
@@ -88,12 +140,33 @@ void OffsetGraphComponent::paint(juce::Graphics& g)
     fillBand(looseMs, sloppyMs, juce::Colour(0x9aa6b9).withAlpha(0.08f));
 
     g.setFont(11.0f);
-    for (int line = -30; line <= 30; line += 10)
+    const auto maxLine = static_cast<int>(std::floor(yHalfRangeMs_ / 10.0)) * 10;
+    for (int line = -maxLine; line <= maxLine; line += 10)
     {
         const auto y = valueToY(static_cast<float>(line), graphMinMs, graphMaxMs, graphArea);
         const auto isZero = line == 0;
-        g.setColour(isZero ? juce::Colour(0x84ecb0).withAlpha(0.95f) : juce::Colours::white.withAlpha(0.16f));
-        g.drawLine(graphArea.getX(), y, graphArea.getRight(), y, isZero ? 1.9f : 1.0f);
+        if (isZero)
+        {
+            g.setColour(juce::Colour(0x84ecb0).withAlpha(0.95f));
+            g.drawLine(graphArea.getX(), y, graphArea.getRight(), y, 1.9f);
+        }
+        else if (std::abs(line) > 30)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.28f));
+            const float dashes[] = { 4.0f, 4.0f };
+            g.drawDashedLine(juce::Line<float>(graphArea.getX(), y, graphArea.getRight(), y), dashes, 2, 1.0f);
+        }
+        else if (std::abs(line) == 30)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.36f));
+            const float dashes[] = { 5.0f, 4.0f };
+            g.drawDashedLine(juce::Line<float>(graphArea.getX(), y, graphArea.getRight(), y), dashes, 2, 1.2f);
+        }
+        else
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.16f));
+            g.drawLine(graphArea.getX(), y, graphArea.getRight(), y, 1.0f);
+        }
         g.setColour(juce::Colours::white.withAlpha(0.72f));
         g.drawText(juce::String(line > 0 ? "+" : "") + juce::String(line) + " ms",
                    juce::Rectangle<int>(static_cast<int>(area.getX()),
@@ -130,23 +203,41 @@ void OffsetGraphComponent::paint(juce::Graphics& g)
     bool hasPath = false;
     std::vector<juce::Point<float>> points;
     points.reserve(samples_.size());
-    for (const auto& sample : samples_)
+
+    // Include one sample before and after visible range to preserve line continuity.
+    int firstVisibleIndex = -1;
+    int lastVisibleIndex = -1;
+    for (int i = 0; i < static_cast<int>(samples_.size()); ++i)
     {
-        if (sample.projectTimeSec < startSec || sample.projectTimeSec > endSec)
-            continue;
-        const auto x = graphArea.getX() + static_cast<float>(((sample.projectTimeSec - startSec) / spanSec) * graphArea.getWidth());
-        const auto y = valueToY(sample.errorMs, graphMinMs, graphMaxMs, graphArea);
-        if (!hasPath)
+        const auto t = samples_[static_cast<std::size_t>(i)].projectTimeSec;
+        if (t >= startSec && t <= endSec)
         {
-            path.startNewSubPath(x, y);
-            hasPath = true;
+            if (firstVisibleIndex < 0)
+                firstVisibleIndex = i;
+            lastVisibleIndex = i;
         }
-        else
+    }
+    if (firstVisibleIndex >= 0)
+    {
+        const auto drawStart = std::max(0, firstVisibleIndex - 1);
+        const auto drawEnd = std::min(static_cast<int>(samples_.size()) - 1, lastVisibleIndex + 1);
+        for (int i = drawStart; i <= drawEnd; ++i)
         {
-            path.lineTo(x, y);
+            const auto& sample = samples_[static_cast<std::size_t>(i)];
+            const auto x = graphArea.getX() + static_cast<float>(((sample.projectTimeSec - startSec) / spanSec) * graphArea.getWidth());
+            const auto y = valueToY(sample.errorMs, graphMinMs, graphMaxMs, graphArea);
+            if (!hasPath)
+            {
+                path.startNewSubPath(x, y);
+                hasPath = true;
+            }
+            else
+            {
+                path.lineTo(x, y);
+            }
+            if (sample.showPoint && sample.projectTimeSec >= startSec && sample.projectTimeSec <= endSec)
+                points.emplace_back(x, y);
         }
-        if (sample.showPoint)
-            points.emplace_back(x, y);
     }
 
     if (hasPath)
@@ -196,22 +287,40 @@ void OffsetGraphComponent::mouseExit(const juce::MouseEvent&)
     repaint();
 }
 
-void OffsetGraphComponent::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+void OffsetGraphComponent::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
 {
     if (running_ || samples_.empty())
         return;
     ensureViewportInitialized();
 
-    const auto delta = std::abs(wheel.deltaX) > std::abs(wheel.deltaY) ? wheel.deltaX : wheel.deltaY;
-    if (std::abs(delta) < 0.001f)
+    const auto absX = std::abs(wheel.deltaX);
+    const auto absY = std::abs(wheel.deltaY);
+    const auto dominant = absX > absY ? wheel.deltaX : wheel.deltaY;
+    if (std::abs(dominant) < 0.0005f)
         return;
 
-    const auto shiftSec = static_cast<double>(delta) * viewportWindowSec_ * 0.22;
-    const auto firstTime = samples_.front().projectTimeSec;
-    const auto lastTime = samples_.back().projectTimeSec;
-    const auto maxStart = std::max(firstTime, lastTime - viewportWindowSec_);
-    viewportStartSec_ = juce::jlimit(firstTime, maxStart, viewportStartSec_ + shiftSec);
-    repaint();
+    if (absX >= absY * 1.1f)
+    {
+        const auto shiftSec = static_cast<double>(wheel.deltaX) * targetViewportWindowSec_ * 0.35;
+        targetViewportStartSec_ += shiftSec;
+        scrollVelocitySec_ += shiftSec * 0.18;
+    }
+    else
+    {
+        const auto oldWindow = targetViewportWindowSec_;
+        const auto zoomFactor = std::exp(-static_cast<double>(wheel.deltaY) * 0.6);
+        targetViewportWindowSec_ = juce::jlimit(3.0, 120.0, oldWindow * zoomFactor);
+
+        const auto area = getLocalBounds().toFloat().reduced(8.0f).withTrimmedLeft(62.0f);
+        const auto xNorm = area.getWidth() > 1.0f
+            ? juce::jlimit(0.0, 1.0, static_cast<double>((event.position.x - area.getX()) / area.getWidth()))
+            : 0.5;
+        const auto anchor = targetViewportStartSec_ + xNorm * oldWindow;
+        targetViewportStartSec_ = anchor - xNorm * targetViewportWindowSec_;
+    }
+
+    clampViewport();
+    startViewportAnimation();
 }
 
 juce::String OffsetGraphComponent::formatProjectTime(double seconds)
@@ -244,7 +353,77 @@ void OffsetGraphComponent::ensureViewportInitialized()
     {
         viewportStartSec_ = std::max(0.0, currentProjectTimeSec_ - viewportWindowSec_);
     }
+    targetViewportStartSec_ = viewportStartSec_;
+    targetViewportWindowSec_ = viewportWindowSec_;
     viewportInitialized_ = true;
+}
+
+void OffsetGraphComponent::clampViewport()
+{
+    if (samples_.empty())
+    {
+        targetViewportStartSec_ = std::max(0.0, targetViewportStartSec_);
+        return;
+    }
+    const auto firstTime = samples_.front().projectTimeSec;
+    const auto lastTime = samples_.back().projectTimeSec;
+    const auto maxStart = std::max(firstTime, lastTime - targetViewportWindowSec_);
+    targetViewportStartSec_ = juce::jlimit(firstTime, maxStart, targetViewportStartSec_);
+}
+
+void OffsetGraphComponent::clampYRange()
+{
+    yHalfRangeMs_ = juce::jlimit(minYHalfRangeMs_, maxYHalfRangeMs_, yHalfRangeMs_);
+}
+
+void OffsetGraphComponent::startViewportAnimation()
+{
+    if (isAnimatingViewport_)
+        return;
+    isAnimatingViewport_ = true;
+    startTimerHz(60);
+}
+
+void OffsetGraphComponent::timerCallback()
+{
+    if (running_)
+    {
+        stopTimer();
+        isAnimatingViewport_ = false;
+        return;
+    }
+
+    clampViewport();
+
+    const auto distance = targetViewportStartSec_ - viewportStartSec_;
+    scrollVelocitySec_ += distance * 0.22;
+    scrollVelocitySec_ *= 0.72;
+    viewportStartSec_ += scrollVelocitySec_;
+
+    const auto zoomDelta = targetViewportWindowSec_ - viewportWindowSec_;
+    viewportWindowSec_ += zoomDelta * 0.28;
+
+    if (!samples_.empty())
+    {
+        const auto firstTime = samples_.front().projectTimeSec;
+        const auto lastTime = samples_.back().projectTimeSec;
+        const auto maxStart = std::max(firstTime, lastTime - viewportWindowSec_);
+        viewportStartSec_ = juce::jlimit(firstTime, maxStart, viewportStartSec_);
+    }
+
+    repaint();
+
+    if (std::abs(distance) < 0.0008 &&
+        std::abs(scrollVelocitySec_) < 0.0008 &&
+        std::abs(zoomDelta) < 0.0015)
+    {
+        viewportStartSec_ = targetViewportStartSec_;
+        viewportWindowSec_ = targetViewportWindowSec_;
+        scrollVelocitySec_ = 0.0;
+        stopTimer();
+        isAnimatingViewport_ = false;
+        repaint();
+    }
 }
 
 FindThePocketAudioProcessorEditor::FindThePocketAudioProcessorEditor(FindThePocketAudioProcessor& p)
@@ -266,8 +445,33 @@ FindThePocketAudioProcessorEditor::FindThePocketAudioProcessorEditor(FindThePock
     addAndMakeVisible(runDurationBox_);
 
     addAndMakeVisible(calibrateButton_);
+    addAndMakeVisible(yZoomOutButton_);
+    addAndMakeVisible(yRangeLabel_);
+    addAndMakeVisible(yZoomInButton_);
+    addAndMakeVisible(yResetButton_);
+    addAndMakeVisible(yAutoButton_);
 
     calibrateButton_.onClick = [this] { processor_.startCalibration(); };
+    yZoomOutButton_.onClick = [this]
+    {
+        offsetGraph_.zoomY(1.25);
+        updateYRangeLabel();
+    };
+    yZoomInButton_.onClick = [this]
+    {
+        offsetGraph_.zoomY(0.8);
+        updateYRangeLabel();
+    };
+    yResetButton_.onClick = [this]
+    {
+        offsetGraph_.resetYRange();
+        updateYRangeLabel();
+    };
+    yAutoButton_.onClick = [this]
+    {
+        if (offsetGraph_.autoYRange())
+            updateYRangeLabel();
+    };
 
     addAndMakeVisible(offsetGraph_);
 
@@ -290,6 +494,7 @@ FindThePocketAudioProcessorEditor::FindThePocketAudioProcessorEditor(FindThePock
     pocketAttachment_ = std::make_unique<ComboAttachment>(processor_.parameters(), "pocketMode", pocketModeBox_);
     durationAttachment_ = std::make_unique<ComboAttachment>(processor_.parameters(), "runDuration", runDurationBox_);
 
+    updateYRangeLabel();
     startTimerHz(30);
 }
 
@@ -312,6 +517,16 @@ void FindThePocketAudioProcessorEditor::resized()
     runDurationBox_.setBounds(controlRow.removeFromLeft(130));
     controlRow.removeFromLeft(8);
     calibrateButton_.setBounds(controlRow.removeFromLeft(90));
+    controlRow.removeFromLeft(10);
+    yZoomOutButton_.setBounds(controlRow.removeFromLeft(44));
+    controlRow.removeFromLeft(4);
+    yRangeLabel_.setBounds(controlRow.removeFromLeft(96));
+    controlRow.removeFromLeft(4);
+    yZoomInButton_.setBounds(controlRow.removeFromLeft(44));
+    controlRow.removeFromLeft(4);
+    yResetButton_.setBounds(controlRow.removeFromLeft(72));
+    controlRow.removeFromLeft(4);
+    yAutoButton_.setBounds(controlRow.removeFromLeft(68));
 
     area.removeFromTop(8);
     auto topStats = area.removeFromTop(50);
@@ -336,14 +551,11 @@ void FindThePocketAudioProcessorEditor::timerCallback()
     const auto count = processor_.drainRecentHits(hits.data(), static_cast<int>(hits.size()));
     for (int i = 0; i < count; ++i)
     {
-        if (hits[static_cast<std::size_t>(i)].plottable)
-        {
-            OffsetGraphComponent::Sample sample;
-            sample.projectTimeSec = hits[static_cast<std::size_t>(i)].projectTimeSec;
-            sample.errorMs = hits[static_cast<std::size_t>(i)].errorMs;
-            sample.showPoint = true;
-            offsetGraph_.pushSample(sample);
-        }
+        OffsetGraphComponent::Sample sample;
+        sample.projectTimeSec = hits[static_cast<std::size_t>(i)].projectTimeSec;
+        sample.errorMs = hits[static_cast<std::size_t>(i)].errorMs;
+        sample.showPoint = true;
+        offsetGraph_.pushSample(sample);
     }
 
     const auto snapshot = processor_.getUiSnapshot();
@@ -379,4 +591,12 @@ juce::String FindThePocketAudioProcessorEditor::formatSignedMs(float value)
     if (value > 0.0f)
         return "+" + juce::String(value, 1) + " ms";
     return juce::String(value, 1) + " ms";
+}
+
+void FindThePocketAudioProcessorEditor::updateYRangeLabel()
+{
+    yRangeLabel_.setText("Y: +/-" + juce::String(static_cast<int>(std::llround(offsetGraph_.yHalfRangeMs()))) + " ms",
+                         juce::dontSendNotification);
+    yRangeLabel_.setJustificationType(juce::Justification::centred);
+    yRangeLabel_.setColour(juce::Label::textColourId, juce::Colours::whitesmoke);
 }

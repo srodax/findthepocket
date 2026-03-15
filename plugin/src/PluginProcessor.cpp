@@ -53,6 +53,7 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     recording_.store(timing.valid && timing.isRecording);
     if (timing.valid)
         projectTimeSec_.store(timing.projectTimeStartSec);
+    const auto transportActive = timing.valid && (timing.isPlaying || timing.isRecording);
 
     if (!calibrating_.load())
     {
@@ -79,9 +80,9 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     onsetDetector_.setSensitivity(sensitivity);
     onsetDetector_.setGainMultiplier(1.0f + sensitivity * 4.0f);
     onsetDetector_.setBeatIntervalMs(beatIntervalMs);
-    onsetDetector_.setDetectEnabled((running_.load() || calibrating_.load()) && timing.valid && timing.isPlaying);
+    onsetDetector_.setDetectEnabled((running_.load() || calibrating_.load()) && transportActive);
 
-    if (running_.load() && timing.valid && timing.isPlaying)
+    if (running_.load() && transportActive)
     {
         const auto beats = transportSync_.countBeatsCrossed(timing, buffer.getNumSamples(), getSampleRate());
         for (int i = 0; i < beats; ++i)
@@ -154,7 +155,7 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         telemetry.projectTimeSec = match.projectTimeSec;
         telemetry.errorMs = static_cast<float>(hit.correctedErrorMs);
         telemetry.points = static_cast<float>(hit.points);
-        telemetry.plottable = hit.plottable;
+        telemetry.plottable = true;
         pushHitTelemetry(telemetry);
     }
 
