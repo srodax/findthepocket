@@ -100,7 +100,7 @@ bool OffsetGraphComponent::autoYRange()
     return true;
 }
 
-bool OffsetGraphComponent::getMedianErrorMs(double& outMedianMs) const
+bool OffsetGraphComponent::getMedianAndMadMs(double& outMedianMs, double& outMadMs) const
 {
     if (samples_.empty())
         return false;
@@ -119,7 +119,26 @@ bool OffsetGraphComponent::getMedianErrorMs(double& outMedianMs) const
         medianValue = (medianValue + static_cast<double>(values[mid - 1])) * 0.5;
     }
     outMedianMs = medianValue;
-    return std::isfinite(outMedianMs);
+
+    std::vector<double> deviations;
+    deviations.reserve(values.size());
+    for (const auto v : values)
+        deviations.push_back(std::abs(static_cast<double>(v) - outMedianMs));
+
+    const auto dMid = deviations.size() / 2;
+    std::nth_element(deviations.begin(),
+                     deviations.begin() + static_cast<std::ptrdiff_t>(dMid),
+                     deviations.end());
+    auto mad = deviations[dMid];
+    if ((deviations.size() % 2) == 0 && dMid > 0)
+    {
+        std::nth_element(deviations.begin(),
+                         deviations.begin() + static_cast<std::ptrdiff_t>(dMid - 1),
+                         deviations.end());
+        mad = (mad + deviations[dMid - 1]) * 0.5;
+    }
+    outMadMs = mad;
+    return std::isfinite(outMedianMs) && std::isfinite(outMadMs);
 }
 
 void OffsetGraphComponent::shiftAllErrors(float deltaMs)
@@ -486,11 +505,13 @@ FindThePocketAudioProcessorEditor::FindThePocketAudioProcessorEditor(FindThePock
     calibrateButton_.onClick = [this]
     {
         double medianMs = 0.0;
-        if (!offsetGraph_.getMedianErrorMs(medianMs))
+        double madMs = 0.0;
+        if (!offsetGraph_.getMedianAndMadMs(medianMs, madMs))
             return;
 
-        // Nudge processor calibration offset so future points center around zero.
-        processor_.nudgeCalibrationOffsetMs(medianMs);
+        const auto jitterMs = juce::jlimit(0.5, 25.0, madMs * 2.0);
+        // Nudge processor calibration offset and update jitter from observed spread.
+        processor_.applyCalibrationEstimate(medianMs, jitterMs);
         // Shift currently displayed history for immediate visual feedback.
         offsetGraph_.shiftAllErrors(static_cast<float>(-medianMs));
     };

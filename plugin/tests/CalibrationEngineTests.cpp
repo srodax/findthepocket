@@ -16,7 +16,7 @@ void testCalibrationFinalize()
     const auto result = calibration.finalize();
     assert(result.valid);
     assert(result.offsetMs >= 8.0 && result.offsetMs <= 11.0);
-    assert(result.jitterMs >= 5.0);
+    assert(result.jitterMs >= 0.5 && result.jitterMs <= 25.0);
 }
 } // namespace
 

@@ -47,12 +47,17 @@ void FindThePocketAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     const auto pocketModeChoice = pocketModeParam != nullptr ? static_cast<int>(std::lround(pocketModeParam->load())) : 0;
     const auto runChoice = runDurationParam != nullptr ? static_cast<int>(std::lround(runDurationParam->load())) : 1;
 
-    if (const auto pendingNudge = pendingCalibrationNudgeMs_.exchange(0.0); std::abs(pendingNudge) > 0.0001)
+    const auto pendingNudge = pendingCalibrationNudgeMs_.exchange(0.0);
+    const auto pendingJitter = pendingCalibrationJitterMs_.exchange(std::numeric_limits<double>::quiet_NaN());
+    if (std::abs(pendingNudge) > 0.0001 || std::isfinite(pendingJitter))
     {
         const auto nextOffset = static_cast<double>(calibrationOffsetMs_.load()) + pendingNudge;
-        const auto jitter = static_cast<double>(calibrationJitterMs_.load());
-        scoring_.setCalibration(nextOffset, jitter);
+        const auto nextJitter = std::isfinite(pendingJitter)
+            ? pendingJitter
+            : static_cast<double>(calibrationJitterMs_.load());
+        scoring_.setCalibration(nextOffset, nextJitter);
         calibrationOffsetMs_.store(static_cast<float>(nextOffset));
+        calibrationJitterMs_.store(static_cast<float>(nextJitter));
         saveGlobalCalibration();
     }
 
@@ -312,6 +317,13 @@ void FindThePocketAudioProcessor::nudgeCalibrationOffsetMs(double deltaMs) noexc
     while (!pendingCalibrationNudgeMs_.compare_exchange_weak(current, current + deltaMs))
     {
     }
+}
+
+void FindThePocketAudioProcessor::applyCalibrationEstimate(double offsetDeltaMs, double jitterMs) noexcept
+{
+    nudgeCalibrationOffsetMs(offsetDeltaMs);
+    if (std::isfinite(jitterMs))
+        pendingCalibrationJitterMs_.store(jitterMs);
 }
 
 FindThePocketAudioProcessor::UiSnapshot FindThePocketAudioProcessor::getUiSnapshot() const noexcept

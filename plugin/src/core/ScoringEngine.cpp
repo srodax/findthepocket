@@ -26,7 +26,7 @@ void ScoringEngine::setPocketMode(PocketMode mode) noexcept
 void ScoringEngine::setCalibration(double offsetMs, double jitterMs) noexcept
 {
     calibrationOffsetMs_ = offsetMs;
-    calibrationJitterMs_ = clamp(jitterMs, 5.0, 25.0);
+    calibrationJitterMs_ = clamp(jitterMs, 0.5, 25.0);
 }
 
 void ScoringEngine::incrementBeatCount() noexcept

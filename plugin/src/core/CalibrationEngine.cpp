@@ -61,7 +61,7 @@ CalibrationEngine::Result CalibrationEngine::finalize()
     const auto mad = median(deviations);
 
     result_.offsetMs = std::clamp(center, -150.0, 150.0);
-    result_.jitterMs = std::clamp(std::round(mad * 2.0), 5.0, 25.0);
+    result_.jitterMs = std::clamp(mad * 2.0, 0.5, 25.0);
     result_.valid = true;
 
     samples_.clear();

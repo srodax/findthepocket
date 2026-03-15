@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <limits>
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -77,6 +78,7 @@ public:
     void startCalibration();
     void stopSession();
     void nudgeCalibrationOffsetMs(double deltaMs) noexcept;
+    void applyCalibrationEstimate(double offsetDeltaMs, double jitterMs) noexcept;
     UiSnapshot getUiSnapshot() const noexcept;
     int drainRecentHits(HitTelemetry* dst, int maxItems) noexcept;
 
@@ -125,6 +127,7 @@ private:
     std::atomic<bool> recording_{ false };
     std::atomic<double> projectTimeSec_{ 0.0 };
     std::atomic<double> pendingCalibrationNudgeMs_{ 0.0 };
+    std::atomic<double> pendingCalibrationJitterMs_{ std::numeric_limits<double>::quiet_NaN() };
     std::atomic<int> runEpoch_{ 0 };
     bool previousRecording_ = false;
     bool canAutoStartOnRecord_ = true;

@@ -25,7 +25,7 @@ public:
     void zoomY(double factor);
     void resetYRange();
     bool autoYRange();
-    bool getMedianErrorMs(double& outMedianMs) const;
+    bool getMedianAndMadMs(double& outMedianMs, double& outMadMs) const;
     void shiftAllErrors(float deltaMs);
     double yHalfRangeMs() const noexcept { return yHalfRangeMs_; }
     void paint(juce::Graphics& g) override;
